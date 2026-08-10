@@ -83,6 +83,99 @@ El `Dockerfile` está listo para producción (healthcheck incluido). En Coolify:
 app desde este repo + un Postgres, variables del `.env.example` en el runtime,
 y el dominio del webhook hacia el puerto 8000.
 
+## Piloto Allok: dónde cargar cada dato
+
+Este despliegue está aislado de Allok y ya tiene la infraestructura creada:
+
+| Componente | Dirección |
+|---|---|
+| Vocero CRM | `https://crm.allok.fun` |
+| NEA | `https://agent.allok.fun` |
+| Webhook de Meta | `https://agent.allok.fun/webhook` |
+| WAHA tester | `https://waha-demo.frontia.app` · sesión `demo-nea-pilot` |
+
+No copies secretos de Allok ni los guardes en Git. Los valores de conexión
+entre contenedores, bases de datos, `BOT_API_KEY`, cifrado y verify tokens ya
+están creados en Coolify; no hace falta regenerarlos para activar el piloto.
+
+### 1. Coolify → proyecto `Vocero` → recurso `nea-agent`
+
+Completa o reemplaza estas variables y vuelve a desplegar **solo NEA**:
+
+| Variable | Dato que debes cargar |
+|---|---|
+| `OPENAI_API_KEY` | Key dedicada de OpenAI; reemplaza `pilot-not-configured` |
+| `META_APP_SECRET` | App Secret de la app Meta dedicada |
+| `ALLOWED_WA_IDS` | Solo el WhatsApp tester, con código de país y sin `+`; reemplaza `pilot-not-configured` |
+
+`CRM_BASE_URL`, `CRM_WEBHOOK_URL`, `CRM_BOT_API_KEY`, `DATABASE_URL` y
+`VERIFY_TOKEN` ya están configuradas. Copia el valor existente de
+`VERIFY_TOKEN`: lo necesitarás en Meta, pero no lo cambies salvo que también
+actualices el webhook allí.
+
+### 2. Vocero CRM
+
+1. Crea la primera cuenta en `https://crm.allok.fun/register`.
+2. En **Settings → WhatsApp**, carga el WABA ID, Phone Number ID y access token
+   permanente del número Meta dedicado.
+3. Completa el perfil del agente y su knowledge base; NEA los leerá por
+   `GET /api/bot/profile`.
+
+Las credenciales de envío de Meta se cargan en la UI de Vocero, no en NEA.
+Vocero es el único servicio que envía las respuestas por Meta Cloud API.
+
+### 3. Meta Developers
+
+En la app y número dedicados al piloto:
+
+1. Configura el callback `https://agent.allok.fun/webhook`.
+2. Usa como verify token el valor `VERIFY_TOKEN` del recurso `nea-agent`.
+3. Suscribe el campo de mensajes de WhatsApp.
+4. Copia **Settings → Basic → App Secret** a `META_APP_SECRET` de NEA.
+
+No apuntes el número/app de Allok a este webhook.
+
+### 4. Google Calendar → recurso `vocero-crm`
+
+Comparte el calendario con la cuenta de servicio como writer y carga en
+Coolify:
+
+| Variable | Dato que debes cargar |
+|---|---|
+| `GOOGLE_CALENDAR_ID` | ID del calendario compartido |
+| `GOOGLE_SERVICE_ACCOUNT_JSON_B64` | JSON completo de la cuenta de servicio, codificado en base64 |
+
+Si esa cuenta no puede crear Google Meet, usa el fallback OAuth y añade
+`GOOGLE_OAUTH_CLIENT_ID` y `GOOGLE_OAUTH_CLIENT_SECRET`; después conecta el
+calendario desde **Vocero → Settings → Calendar**. OpenRouter es opcional y se
+reserva al Lab de Vocero: NEA no lo necesita.
+
+### 5. WAHA: solo en la máquina que ejecuta el self-test
+
+WAHA simula a un usuario externo. Estas variables **no van en Coolify**:
+
+```env
+WAHA_BASE_URL=https://waha-demo.frontia.app
+WAHA_SESSION=demo-nea-pilot
+WAHA_API_KEY=<key scoped read+send guardada en Keychain>
+LIVE_TARGET_NUMBER=<número Meta dedicado, con país y sin +>
+```
+
+Escanea la sesión `demo-nea-pilot`, confirma que quede `WORKING` y ejecuta
+`python selftest/waha.py`. Mantén `ALLOWED_WA_IDS` limitado al número tester
+durante todo el piloto.
+
+### Orden de activación
+
+1. WAHA en estado `WORKING`.
+2. Cuenta inicial, WhatsApp y perfil configurados en Vocero.
+3. OpenAI, App Secret y allowlist cargados en NEA.
+4. Webhook verificado y suscrito en Meta.
+5. Calendar configurado en Vocero.
+6. Redeploy de `nea-agent` y `vocero-crm` y comprobación de
+   `https://agent.allok.fun/health` y `https://crm.allok.fun/api/health`.
+7. Conversación real desde WAHA; usa `/reset` antes de repetir un caso.
+
 ### Probar en seco
 
 - **Allowlist de pruebas**: con `ALLOWED_WA_IDS` poblada, Nea solo responde a
