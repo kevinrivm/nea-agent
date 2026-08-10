@@ -91,9 +91,10 @@ y el dominio del webhook hacia el puerto 8000.
 - **Comando `/reset`**: desde una línea de la allowlist, reinicia la memoria
   de esa conversación (ficha limpia, IA reactivada) — cada prueba arranca con
   un lead virgen.
-- `selftest/evolution.py` es un harness opcional para mandar WhatsApp reales
-  desde una línea tester vía [Evolution API](https://doc.evolution-api.com/),
-  con pausas mínimas, tope de mensajes y kill-switch de archivo.
+- `selftest/waha.py` es un harness opcional para mandar WhatsApp reales desde
+  una línea tester vía [WAHA](https://waha.devlike.pro/). La key queda limitada
+  a una sola sesión con `read + send`; conserva pausas, tope de mensajes,
+  destino único y kill-switch de archivo.
 
 ## Definición de Hecho
 
@@ -115,7 +116,7 @@ que definen la personalidad:
 | Variable | Default | Qué hace |
 |---|---|---|
 | `AGENT_NAME` | `Nea` | Nombre del agente si el CRM no define uno |
-| `AGENT_TIMEZONE` | `America/Mexico_City` | Zona horaria IANA para fechas del prompt |
+| `AGENT_TIMEZONE` | `America/Caracas` | Zona horaria IANA para fechas del prompt |
 | `BRIEF_PATH` | *(vacío)* | Markdown local con el brief del negocio (fallback) |
 
 ## Licencia
