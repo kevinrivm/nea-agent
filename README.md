@@ -6,7 +6,7 @@ Nea es un microservicio (FastAPI + Postgres) que atiende el WhatsApp de tu
 negocio: conversa con cada lead como un humano bien entrenado, lo califica
 según TUS criterios, y agenda citas reales en tu calendario — o lo despide con
 dignidad cuando no es fit. Funciona en pareja con
-[Vocero CRM](https://github.com/kevinrivm/vocero-crm): el CRM es la fuente de
+[Vocero CRM](https://github.com/adriaavila/vocero-crm): el CRM es la fuente de
 verdad (contactos, bandeja, pipeline, calendario, envío a Meta) y Nea es el
 cerebro conversacional.
 
@@ -67,7 +67,7 @@ Vocero CRM con el bot gateway habilitado (`BOT_API_KEY`), y una app de Meta
 con WhatsApp Cloud API apuntando su webhook a este servicio.
 
 ```bash
-git clone https://github.com/kevinrivm/nea-agent && cd nea-agent
+git clone https://github.com/adriaavila/nea-agent && cd nea-agent
 python -m venv .venv && . .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 cp .env.example .env                            # llena los REEMPLAZA_...

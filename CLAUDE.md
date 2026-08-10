@@ -2,7 +2,7 @@
 
 Microservicio FastAPI del agente de agendamiento para WhatsApp. Recibe el
 webhook de WhatsApp (Meta Cloud API), lo releva al CRM
-([vocero-crm](https://github.com/kevinrivm/vocero-crm)) y conversa vía OpenAI
+([vocero-crm](https://github.com/adriaavila/vocero-crm)) y conversa vía OpenAI
 — **enviando siempre a través del API del CRM**, nunca directo a Meta.
 
 ## Stack
