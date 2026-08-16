@@ -84,8 +84,17 @@ async def test_book_slot_taken_ofrece_alternativas_frescas(runtime_y_ctx, respx_
         {"startUtc": "2026-07-21T16:00:00Z", "endUtc": None, "label": "martes 21, 10:00 am"},
         {"startUtc": "2026-07-21T17:00:00Z", "endUtc": None, "label": "martes 21, 11:00 am"},
     ]
+    # Forma REAL del CRM: el código va ANIDADO bajo `error` (lib/api.ts).
+    # El mock viejo lo ponía en la raíz y por eso este test pasaba mientras en
+    # producción el slot_taken nunca se activaba.
     respx_mock.post(f"{CRM_URL}/api/bot/bookings").mock(
-        return_value=httpx.Response(409, json={"code": "slot_taken", "slots": frescos})
+        return_value=httpx.Response(
+            409,
+            json={
+                "error": {"code": "slot_taken", "message": "ese horario ya se ocupó"},
+                "slots": frescos,
+            },
+        )
     )
     result = await runtime.execute("book_session", {"start_utc": SLOT_ISO})
     assert result["ok"] is False
@@ -95,6 +104,44 @@ async def test_book_slot_taken_ofrece_alternativas_frescas(runtime_y_ctx, respx_
     offered = await ctx.store.get_offered_slots(conv.id)
     assert [s.label for s in offered] == [s["label"] for s in frescos]
     assert runtime.booked is False
+
+
+async def test_book_slot_taken_tambien_con_el_codigo_en_la_raiz(
+    runtime_y_ctx, respx_mock
+):
+    """Compatibilidad: un CRM que emita el código plano sigue funcionando."""
+    runtime, ctx, conv = runtime_y_ctx
+    frescos = [
+        {"startUtc": "2026-07-21T16:00:00Z", "endUtc": None, "label": "martes 21, 10:00 am"},
+    ]
+    respx_mock.post(f"{CRM_URL}/api/bot/bookings").mock(
+        return_value=httpx.Response(409, json={"code": "slot_taken", "slots": frescos})
+    )
+    result = await runtime.execute("book_session", {"start_utc": SLOT_ISO})
+    assert result["ok"] is False
+    assert result["error"] == "slot_taken"
+    assert [s["label"] for s in result["slots"]] == [s["label"] for s in frescos]
+
+
+async def test_book_devuelve_join_url_del_contrato(runtime_y_ctx, respx_mock):
+    """El agente no se casa con un proveedor: `joinUrl` es el nombre del contrato."""
+    runtime, ctx, conv = runtime_y_ctx
+    respx_mock.post(f"{CRM_URL}/api/bot/bookings").mock(
+        return_value=httpx.Response(
+            201,
+            json={
+                "bookingId": "bk_1",
+                "label": "martes 21, 10:00 am",
+                "joinUrl": "https://reunion.ejemplo.com/abc",
+            },
+        )
+    )
+    respx_mock.put(f"{CRM_URL}/api/bot/ficha").mock(
+        return_value=httpx.Response(200, json={"ficha": {}})
+    )
+    result = await runtime.execute("book_session", {"start_utc": SLOT_ISO})
+    assert result["ok"] is True
+    assert result["zoom_url"] == "https://reunion.ejemplo.com/abc"
 
 
 async def test_propose_slots_maximo_3_y_persistidos(runtime_y_ctx, respx_mock):

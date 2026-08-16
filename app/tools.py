@@ -274,7 +274,10 @@ class ToolRuntime:
         return {
             "ok": True,
             "label": result.get("label") or chosen.label,
-            "zoom_url": result.get("zoomJoinUrl"),
+            # `joinUrl` es el nombre del contrato; `zoomJoinUrl` es el alias
+            # histórico del CRM. El agente no debe casarse con un proveedor de
+            # videollamada concreto.
+            "zoom_url": result.get("joinUrl") or result.get("zoomJoinUrl"),
             "instrucciones": (
                 "confirma día y hora de la cita, comparte el link de la "
                 "videollamada si existe y menciona lo que el negocio pida "

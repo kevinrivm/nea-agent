@@ -42,11 +42,28 @@ class SlotTaken(CrmConflict):
         self.slots: list[dict[str, Any]] = list((payload or {}).get("slots") or [])
 
 
-def _conflict_code(response: httpx.Response) -> str:
+def _payload(response: httpx.Response) -> dict[str, Any]:
     try:
-        return str(response.json().get("code") or "conflict")
+        data = response.json()
     except Exception:
-        return "conflict"
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _conflict_code(response: httpx.Response) -> str:
+    """Código tipado de un 409, tolerando las dos formas del cuerpo.
+
+    El CRM anida SIEMPRE `{"error": {"code": ...}}` (lib/api.ts::apiError); la
+    forma plana `{"code": ...}` solo existía en los mocks viejos de estos
+    tests. Leyendo únicamente la raíz, en producción TODO 409 se degradaba a
+    "conflict" genérico y el camino de `slot_taken` —re-ofrecer alternativas
+    frescas— nunca se activaba. Se toleran ambas.
+    """
+    payload = _payload(response)
+    nested = payload.get("error")
+    if isinstance(nested, dict) and nested.get("code"):
+        return str(nested["code"])
+    return str(payload.get("code") or "conflict")
 
 
 # Catálogo cerrado del CRM para handoff.reason (006). El LLM escribe motivos
@@ -168,14 +185,11 @@ class CrmClient:
             json={"conversationId": conversation_id, "startUtc": start_utc},
         )
         if resp.status_code == 409:
-            payload: dict[str, Any] = {}
-            try:
-                payload = resp.json()
-            except Exception:
-                pass
-            if payload.get("code") == "slot_taken":
+            payload = _payload(resp)
+            code = _conflict_code(resp)
+            if code == "slot_taken":
                 raise SlotTaken(payload)
-            raise CrmConflict(_conflict_code(resp), payload)
+            raise CrmConflict(code, payload)
         # El CRM real responde 201 Created (REST); los mocks viejos daban 200.
         if resp.status_code not in (200, 201):
             raise CrmError(f"bookings devolvió {resp.status_code}")
