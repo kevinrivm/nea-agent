@@ -66,6 +66,12 @@ Requisitos: Python 3.11+, Postgres propio (no el del CRM), una instancia de
 Vocero CRM con el bot gateway habilitado (`BOT_API_KEY`), y una app de Meta
 con WhatsApp Cloud API apuntando su webhook a este servicio.
 
+**Si quieres que Nea agende, enciende el motor de agenda de Vocero**
+(`AGENDA=on` en el CRM): viene apagado por defecto. Nea lo detecta al arrancar
+— contra un CRM sin agenda no ofrece horarios ni promete citas, califica y
+escala a un humano. La agenda la lleva el CRM: Nea le pide los huecos, él
+registra lo ofrecido y solo acepta reservar uno de esos.
+
 ```bash
 git clone https://github.com/kevinrivm/nea-agent && cd nea-agent
 python -m venv .venv && . .venv/bin/activate   # Windows: .venv\Scripts\activate

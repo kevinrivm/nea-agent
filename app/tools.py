@@ -1,9 +1,15 @@
 """Herramientas del LLM: update_ficha, propose_slots, book_session, route_out, handoff.
 
-La validación es server-side: `book_session` SOLO acepta slots previamente
-ofrecidos (tabla offered_slots, comparación por epoch exacto). Un fallo del
-CRM dentro de una tool regresa `{"ok": false, ...}` al LLM — nunca tumba el
-turno.
+Solo se reserva lo que se ofreció, y **quien manda sobre eso es el CRM**:
+Vocero guarda la oferta contra la conversación y rechaza cualquier otro
+instante. La tabla `offered_slots` de Nea es un ESPEJO de esa oferta, no una
+segunda fuente de verdad: sirve para etiquetar con el día en palabras y para
+frenar una alucinación antes de gastar un viaje de red. Si el CRM dice que un
+horario no se ofreció, el espejo está viejo y se resincroniza con lo que él
+mande.
+
+Un fallo del CRM dentro de una tool regresa `{"ok": false, ...}` al LLM —
+nunca tumba el turno.
 """
 from __future__ import annotations
 
@@ -11,7 +17,13 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from app.crm import CrmConflict, CrmError, SlotTaken
+from app.crm import (
+    AgendaUnavailable,
+    CrmConflict,
+    CrmError,
+    SlotNotOffered,
+    SlotTaken,
+)
 from app.profile import BusinessProfile
 from app.state import AppContext, Conversation, OfferedSlot
 
@@ -162,6 +174,46 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
 ]
 
 
+# Herramientas que solo tienen sentido si el CRM agenda.
+AGENDA_TOOLS = frozenset({"propose_slots", "book_session", "reschedule_session"})
+
+
+def tool_schemas(agenda_enabled: bool = True) -> list[dict[str, Any]]:
+    """El catálogo que se le ofrece al modelo en ESTE turno.
+
+    Contra un CRM sin agenda no se le enseñan las herramientas de agendar: si
+    se le enseñan, las llama, fallan todas y el lead recibe evasivas en vez de
+    un handoff limpio. Que no exista la herramienta es más claro que pedirle al
+    prompt que se acuerde de no usarla.
+    """
+    if agenda_enabled:
+        return TOOL_SCHEMAS
+    return [
+        t
+        for t in TOOL_SCHEMAS
+        if t.get("function", {}).get("name") not in AGENDA_TOOLS
+    ]
+
+
+def _meeting(result: dict[str, Any]) -> tuple[str | None, bool]:
+    """Enlace de la reunión y si el CRM lo dejó pendiente.
+
+    Vocero devuelve `meetingLink` desde que la entrega de la reunión es un
+    conector (puede ser Zoom, Google Meet o la sala fija del negocio); antes
+    era `zoomJoinUrl`, y ese nombre se sigue aceptando para no romper un CRM
+    viejo. Leer solo el viejo hacía que el enlace llegara SIEMPRE vacío contra
+    un Vocero actual: la cita se creaba bien y el lead se quedaba sin por dónde
+    entrar.
+
+    `linkPending` es lo que evita prometer de más: la cita existe pero el
+    proveedor todavía no entregó el enlace, así que se confirma la cita y se
+    dice que el enlace llega en un momento.
+    """
+    link = result.get("meetingLink") or result.get("zoomJoinUrl")
+    pending = bool(result.get("linkPending"))
+    return (str(link) if link else None), pending
+
+
 def _iso_z(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -269,9 +321,17 @@ class ToolRuntime:
         return {"ok": True}
 
     async def _propose_slots(self) -> dict[str, Any]:
-        raw = await self._ctx.crm.get_availability(
-            limit=MAX_OFFERED, per_day=OFFER_PER_DAY, days=OFFER_DAYS
-        )
+        # La conversación va SIEMPRE: es contra ella que el CRM registra la
+        # oferta, y sin ella no hay nada reservable después.
+        try:
+            raw = await self._ctx.crm.get_availability(
+                self._crm_conv_id,
+                limit=MAX_OFFERED,
+                per_day=OFFER_PER_DAY,
+                days=OFFER_DAYS,
+            )
+        except AgendaUnavailable:
+            return self._sin_agenda()
         slots = _slots_from_payload(self._conv.id, raw)
         if not slots:
             return {
@@ -340,6 +400,55 @@ class ToolRuntime:
         )
         return chosen, None
 
+    def _sin_agenda(self) -> dict[str, Any]:
+        """Este CRM no tiene agenda: dejar de prometer citas, no reintentar."""
+        self._ctx.agenda_enabled = False
+        logger.info("tools: el CRM no expone agenda — agendamiento desactivado")
+        return {
+            "ok": False,
+            "error": "sin_agenda",
+            "detalle": (
+                "este negocio no agenda por aquí; no ofrezcas horarios ni "
+                "prometas cita — resuelve lo que puedas y haz handoff"
+            ),
+        }
+
+    async def _resync_offer(
+        self, exc: SlotNotOffered, accion: str
+    ) -> dict[str, Any]:
+        """El CRM no reconoce ese horario: su lista manda, la nuestra se tira.
+
+        Pasa cuando el espejo local quedó viejo — por ejemplo si el CRM
+        reemplazó la oferta por su cuenta. Antes esto caía en el `except
+        CrmError` genérico y el agente solo decía "no pude"; ahora vuelve a
+        ofrecer lo que el CRM sí tiene registrado.
+        """
+        fresh = _slots_from_payload(self._conv.id, exc.slots)
+        await self._ctx.store.replace_offered_slots(self._conv.id, fresh)
+        logger.info(
+            "tools: %s rechazado por el CRM (no ofrecido) — oferta resincronizada a %d",
+            accion,
+            len(fresh),
+        )
+        if not fresh:
+            return {
+                "ok": False,
+                "error": "slot_no_ofrecido",
+                "detalle": (
+                    "el CRM no tiene horarios ofrecidos en esta conversación; "
+                    "vuelve a llamar propose_slots antes de agendar"
+                ),
+            }
+        return {
+            "ok": False,
+            "error": "slot_no_ofrecido",
+            "detalle": (
+                "ese horario ya no está ofrecido; ofrécele estos, que son los "
+                "que el negocio tiene reservados para esta conversación"
+            ),
+            "slots": _slots_for_llm(fresh),
+        }
+
     async def _book_session(self, args: dict[str, Any]) -> dict[str, Any]:
         chosen, error = await self._resolve_offered(args, "book_session")
         if error is not None or chosen is None:
@@ -358,6 +467,10 @@ class ToolRuntime:
                 "detalle": "ese horario se acaba de ocupar; discúlpate breve y ofrece estas alternativas",
                 "slots": _slots_for_llm(fresh),
             }
+        except SlotNotOffered as exc:
+            return await self._resync_offer(exc, "book_session")
+        except AgendaUnavailable:
+            return self._sin_agenda()
         await self._ctx.store.clear_offered_slots(self._conv.id)
         self.booked = True
         try:
@@ -371,11 +484,14 @@ class ToolRuntime:
             # La etiqueta del slot ofrecido trae el día en palabras; la del
             # CRM es la corta. Se repite ESTA para que el lead lea el día.
             "label": chosen.label or result.get("label"),
-            "zoom_url": result.get("zoomJoinUrl"),
+            "meeting_url": _meeting(result)[0],
+            "enlace_pendiente": _meeting(result)[1],
             "instrucciones": (
                 "confirma el día COMPLETO y la hora tal cual dice label, "
-                "comparte el link de la videollamada si existe y menciona lo "
-                "que el negocio pida para llegar preparado"
+                "comparte meeting_url si viene y menciona lo que el negocio "
+                "pida para llegar preparado. Si enlace_pendiente es true, la "
+                "cita SÍ quedó: di que el enlace le llega por aquí en un "
+                "momento, no prometas uno que no tienes"
             ),
         }
 
@@ -396,6 +512,10 @@ class ToolRuntime:
                 "detalle": "ese horario se acaba de ocupar; discúlpate breve y ofrece estas alternativas",
                 "slots": _slots_for_llm(fresh),
             }
+        except SlotNotOffered as exc:
+            return await self._resync_offer(exc, "reschedule_session")
+        except AgendaUnavailable:
+            return self._sin_agenda()
         except CrmConflict as exc:
             if exc.code == "no_booking":
                 return {
@@ -409,7 +529,8 @@ class ToolRuntime:
         return {
             "ok": True,
             "label": chosen.label or result.get("label"),
-            "zoom_url": result.get("zoomJoinUrl"),
+            "meeting_url": _meeting(result)[0],
+            "enlace_pendiente": _meeting(result)[1],
             "instrucciones": (
                 "confirma que quedó movida, con el día COMPLETO y la hora tal "
                 "cual dice label; el link de la videollamada sigue siendo el "

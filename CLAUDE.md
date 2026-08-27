@@ -34,6 +34,16 @@ idempotentes al arranque · httpx (CRM y OpenAI) · pytest + respx · Docker
   vacíes sin decisión explícita del dueño de la instancia.
 - **Degradación silenciosa**: LLM/CRM fallando jamás rompe el webhook ni manda
   texto roto; tras reintentos → silencio + handoff `error`.
+- **La agenda la manda el CRM.** Vocero registra la oferta contra la
+  conversación (por eso `conversationId` va SIEMPRE en `get_availability`) y
+  decide qué es reservable. `offered_slots` de Nea es un ESPEJO: sirve para
+  etiquetar con el día en palabras y frenar alucinaciones antes del viaje de
+  red. Si el CRM responde `slot_not_offered`, su lista gana y el espejo se
+  resincroniza — no se discute.
+- **La agenda puede no existir.** En Vocero va detrás de la bandera `AGENDA`,
+  apagada por defecto: esos endpoints responden 404. Se sondea al arrancar
+  (`crm.agenda_available()`); sin agenda no se le enseñan al modelo las
+  herramientas de agendar y el prompt se lo dice.
 
 ## Definición de Hecho
 
