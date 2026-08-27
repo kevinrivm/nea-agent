@@ -75,6 +75,18 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         c: AppContext = app.state.ctx
         _wire_coalescer(c)
 
+        if own_resources:
+            # ¿Este CRM agenda? Vocero trae el motor detrás de una bandera de
+            # despliegue y viene apagado por defecto. Se pregunta una vez, aquí,
+            # en vez de descubrirlo lead por lead: así el primero que escriba ya
+            # recibe el comportamiento correcto en vez de una promesa de cita
+            # que no se puede cumplir.
+            c.agenda_enabled = await c.crm.agenda_available()
+            logger.info(
+                "agenda del CRM: %s",
+                "disponible" if c.agenda_enabled else "APAGADA — Nea no ofrecerá citas",
+            )
+
         relay_worker = RelayWorker(c.store, c.settings.crm_webhook_url, c.relay_wake)
         followup_worker = FollowupWorker(c)
         sender_worker = SenderWorker(c)

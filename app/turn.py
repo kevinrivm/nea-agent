@@ -23,7 +23,7 @@ from app.stall import ALERTA as STALL_ALERT, racha_vacia, sin_rumbo
 from app.profile import resolve_profile
 from app.prompt import build_system_prompt
 from app.state import AppContext, InboundMessage, utcnow
-from app.tools import TOOL_SCHEMAS, ToolRuntime
+from app.tools import ToolRuntime, tool_schemas
 
 logger = logging.getLogger("nea.turn")
 
@@ -199,6 +199,7 @@ async def run_turn(
         conv=conv,
         referral_headline=referral,
         offered=offered,
+        agenda=ctx.agenda_enabled,
         tz=_agent_tz(settings),
     )
     # Se traen más mensajes de los que ve el LLM: el candado de cierre cuenta
@@ -337,7 +338,9 @@ async def _tool_loop(
 ) -> str | None:
     """Rondas de tool-calling hasta obtener texto final (o rendirse)."""
     for _ in range(MAX_TOOL_ROUNDS):
-        reply = await ctx.llm.complete(messages, tools=TOOL_SCHEMAS)
+        reply = await ctx.llm.complete(
+            messages, tools=tool_schemas(ctx.agenda_enabled)
+        )
         if not reply.tool_calls:
             return reply.content  # turno de puro texto
         # content vacío con tool_calls es normal (turno solo-herramientas)

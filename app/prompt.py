@@ -150,6 +150,7 @@ def build_system_prompt(
     conv: Conversation,
     referral_headline: str | None = None,
     offered: list[OfferedSlot] | None = None,
+    agenda: bool = True,
     now: datetime | None = None,
     tz: ZoneInfo | None = None,
 ) -> str:
@@ -157,6 +158,15 @@ def build_system_prompt(
     tz = tz or DEFAULT_TZ
     now = now or datetime.now(timezone.utc)
     lines: list[str] = ["", "CONTEXTO ACTUAL:"]
+    if not agenda:
+        # El CRM de esta instancia no agenda (Vocero trae el motor detrás de
+        # una bandera). Sin esto el agente sigue prometiendo cita y el lead se
+        # topa con una puerta cerrada al final de la conversación.
+        lines.append(
+            "- ESTE NEGOCIO NO AGENDA POR AQUÍ: no ofrezcas horarios ni "
+            "prometas una cita. Resuelve lo que puedas y, cuando el lead "
+            "quiera avanzar, haz handoff para que lo coordine una persona."
+        )
     lines.append(f"- Fecha y hora: {_fmt_local(now, tz)}.")
     # "Mañana" resuelto por el sistema: el lead lo dice todo el tiempo y el
     # modelo no tiene por qué calcularlo (ni equivocarse de día).

@@ -356,6 +356,11 @@ class AppContext:
     profile: Any | None = None  # ProfileProvider; None en tests = perfil mínimo
     coalescer: Any | None = None
     relay_wake: asyncio.Event = field(default_factory=asyncio.Event)
+    # ¿El CRM de esta instancia tiene motor de agenda? Vocero lo trae detrás de
+    # una bandera de despliegue y viene apagado por defecto. Se resuelve al
+    # arrancar (y se corrige solo si en caliente resulta que no está), para no
+    # ofrecerle horarios a un lead contra un CRM que no puede agendarlos.
+    agenda_enabled: bool = True
     # Un candado por identidad: los turnos de UNA conversación se serializan.
     # Sin esto, una ráfaga que llega mientras el turno anterior sigue en vuelo
     # abre un segundo turno con contexto viejo (se reservó una cita antes de
