@@ -44,6 +44,17 @@ class Settings(BaseSettings):
     # LLM
     openai_api_key: str = ""
     openai_model: str = "gpt-4o-mini"
+    # Proveedor del modelo. Vacío = OpenAI, como siempre.
+    #
+    # Cualquier API compatible con OpenAI vale: OpenRouter, un modelo propio,
+    # lo que sea. Con OpenRouter va `https://openrouter.ai/api/v1` y el modelo
+    # lleva su prefijo (`anthropic/claude-sonnet-4.5`).
+    #
+    # OJO CON LAS NOTAS DE VOZ: transcribir es una API propia de OpenAI, no
+    # parte de lo compatible. Apuntando a otro proveedor, un audio del cliente
+    # no se transcribe — Nea lo dice y pide que se lo escriban, en vez de
+    # callarse. Si necesitas notas de voz, deja este campo vacío y usa OpenAI.
+    openai_base_url: str = ""
     openai_transcribe_model: str = "whisper-1"  # notas de voz → texto
     history_window: int = 10
 

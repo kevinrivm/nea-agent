@@ -77,6 +77,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                     settings.openai_api_key,
                     settings.openai_model,
                     transcribe_model=settings.openai_transcribe_model,
+                    base_url=settings.openai_base_url or None,
                 ),
                 profile=ProfileProvider(
                     crm,

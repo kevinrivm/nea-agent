@@ -325,3 +325,30 @@ class TestCliente:
         # No existe en esta superficie. Hacerlo estallar convertiría un comando
         # de pruebas en una caída del turno.
         await cliente.post_reset(CONV)
+
+
+# ── El proveedor del modelo ───────────────────────────────────────────────
+
+
+class TestProveedor:
+    def test_sin_base_url_es_OpenAI_como_siempre(self) -> None:
+        # La garantía para quien ya corre Nea: no cambia de proveedor por que
+        # esta variable exista.
+        assert Settings().openai_base_url == ""
+
+    def test_se_puede_apuntar_a_openrouter(self) -> None:
+        s = Settings(openai_base_url="https://openrouter.ai/api/v1")
+        assert s.openai_base_url == "https://openrouter.ai/api/v1"
+
+    def test_el_cliente_apunta_al_proveedor_configurado(self) -> None:
+        from app.llm import OpenAiLlm
+
+        llm = OpenAiLlm("k", "anthropic/claude-sonnet-4.5",
+                        base_url="https://openrouter.ai/api/v1")
+        assert "openrouter.ai" in str(llm._client.base_url)
+
+    def test_sin_base_url_el_cliente_va_a_openai(self) -> None:
+        from app.llm import OpenAiLlm
+
+        llm = OpenAiLlm("k", "gpt-4o-mini", base_url=None)
+        assert "openai.com" in str(llm._client.base_url)
