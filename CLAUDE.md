@@ -39,9 +39,14 @@ idempotentes al arranque · httpx (CRM y OpenAI) · pytest + respx · Docker
   1. **La conversación es de (organización, identidad)**, nunca de la
      identidad sola. La misma persona puede escribirle a dos negocios, y con
      la clave global el historial de uno entraba en el prompt del otro.
-  2. **Sin la llave de IA del miembro NO se piensa** — ni en el turno ni en el
-     seguimiento. Caer a `LLM_API_KEY` del entorno le cobraría a la cuenta del
-     dueño de la plataforma el consumo de todos.
+  2. **Quien piensa es el CRM**, no Nea. El cliente del modelo apunta a
+     `/api/brains/llm` con la credencial derivada, y el CRM le pone la llave
+     del miembro al reenviar. Si el CRM no ofrece pensar, NO se piensa — ni en
+     el turno ni en el seguimiento: caer a `LLM_API_KEY` del entorno le
+     cobraría al dueño de la plataforma el consumo de todos sus miembros.
+  2b. **Sin modelo que OIGA no se transcribe.** Caer al que conversa devuelve
+     una alucinación con pinta de transcripción, y quien la lee no tiene cómo
+     saber que es falsa.
   3. **`ctx.crm` y `ctx.llm` se arman por turno.** El del arranque es un
      centinela que revienta al usarse: un camino que se olvide de armarlos
      tiene que fallar, no escribirle al negocio equivocado.

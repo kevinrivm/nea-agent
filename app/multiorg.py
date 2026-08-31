@@ -25,11 +25,19 @@ Derivarla en vez de recibirla tiene una consecuencia práctica que importa: un
 worker de seguimiento que despierta cuatro horas después la vuelve a calcular
 igual. No hay token que caduque a media conversación ni credencial que guardar.
 
-## Lo que NO viene por aquí
+## Con qué piensa
 
-La llave de OpenRouter. Esa viaja en el contexto de cada conversación
-(`/api/brains/context`), porque es del MIEMBRO y cambia según a quién se esté
-atendiendo. Ver `crm_brains.py`.
+**No con una llave propia, y tampoco con la del miembro.** El CRM piensa por
+Nea: `/api/brains/llm` es un endpoint compatible con OpenAI que le pone la
+credencial de esa organización y reenvía al proveedor.
+
+Así la llave del miembro no sale nunca del CRM —una filtrada no se puede
+desfiltrar— y, de paso, cuando el proveedor la rechaza es el CRM quien recibe
+el 401 y puede pausarla en el panel de su dueño. Cuando la llave viajaba, ese
+código se lo comía Nea y el miembro veía «activa» mientras nada funcionaba.
+
+Del contexto de cada conversación sale la ruta y qué modelos puede usar. Ver
+`crm_brains.py`.
 """
 from __future__ import annotations
 
@@ -95,9 +103,9 @@ class RegistroDeOrganizaciones:
         self._brief = brief_path
         self._clientes: dict[str, BrainsCrmClient] = {}
         self._perfiles: dict[str, ProfileProvider] = {}
-        # Cacheados por CREDENCIAL y no por organizacion: si el miembro rota
-        # su llave o cambia de modelo, la tupla cambia y el siguiente turno
-        # ya usa el cliente nuevo sin que nadie tenga que invalidar nada.
+        # Cacheados por la tupla completa y no por organizacion: si el miembro
+        # cambia de modelo, la tupla cambia y el siguiente turno ya usa el
+        # cliente nuevo sin que nadie tenga que invalidar nada.
         self._llms: dict[tuple[str, str, str, str], OpenAiLlm] = {}
 
     def cliente(self, organization_id: str, slug: str) -> BrainsCrmClient:
@@ -132,29 +140,42 @@ class RegistroDeOrganizaciones:
             self._perfiles[organization_id] = proveedor
         return proveedor
 
-    def llm(self, credenciales: dict[str, Any], por_defecto: Any) -> OpenAiLlm:
-        """El cliente del modelo con la llave del MIEMBRO.
+    def llm(
+        self,
+        organization_id: str,
+        slug: str,
+        config: dict[str, Any],
+        por_defecto: Any,
+    ) -> OpenAiLlm:
+        """El cliente del modelo, apuntando al CRM.
 
-        `por_defecto` son los ajustes de esta Nea, y solo rellenan los huecos:
-        si el miembro no eligio modelo, se usa el de la instancia. La LLAVE
-        nunca se rellena — sin llave del miembro no hay turno, porque
-        pensar con la del duenio de la plataforma es justo el gasto que este
-        modo existe para evitar.
+        No lleva la llave de nadie: lleva la credencial derivada de esta
+        organización, la misma con la que Nea le habla al CRM para todo lo
+        demás. El CRM le pone la llave del miembro al reenviar al proveedor.
+
+        Para el SDK de OpenAI esto es un proveedor compatible más. Por eso el
+        cambio cabe aquí y no se nota en el resto del turno.
+
+        `por_defecto` son los ajustes de esta Nea y solo rellenan el modelo
+        que conversa. El que TRANSCRIBE no se rellena: si el miembro no
+        eligió uno que oiga, es mejor no transcribir que mandarle el audio a
+        uno que no oye y quedarnos con lo que invente.
         """
-        api_key = str(credenciales.get("apiKey") or "")
-        model = str(credenciales.get("model") or por_defecto.llm_model)
-        transcribe = str(
-            credenciales.get("transcribeModel") or por_defecto.llm_transcribe_model
+        base_url = self._base_url.rstrip("/") + str(
+            config.get("path") or "/api/brains/llm"
         )
-        base_url = str(credenciales.get("baseUrl") or por_defecto.llm_base_url or "")
-        clave = (api_key, model, transcribe, base_url)
+        model = str(config.get("model") or por_defecto.llm_model)
+        transcribe = str(config.get("transcribeModel") or "")
+        credencial = credencial_derivada(self._secreto, organization_id)
+        clave = (credencial, model, transcribe, base_url)
         cliente = self._llms.get(clave)
         if cliente is None:
             cliente = OpenAiLlm(
-                api_key,
+                credencial,
                 model,
                 transcribe_model=transcribe,
-                base_url=base_url or None,
+                base_url=base_url,
+                default_headers={"X-Vocero-Organization": slug},
             )
             self._llms[clave] = cliente
         return cliente

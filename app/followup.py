@@ -120,18 +120,27 @@ class FollowupWorker:
             )
             return
 
-        # El empujón se piensa con la llave de SU miembro, igual que el turno.
-        # Sin ella no se piensa: cobrarle a la cuenta del dueño de la
-        # plataforma es justo lo que el modo multi-organización evita.
+        # El empujón se piensa a cuenta de SU miembro, igual que el turno: por
+        # el CRM, con la credencial de esta organización. Si el CRM no ofrece
+        # pensar, no se piensa — usar la llave del entorno le cobraría al
+        # dueño de la plataforma el consumo de sus miembros.
         if ctx.settings.multi_org:
-            credenciales = getattr(ctx.crm, "credenciales_llm", lambda: None)()
-            if not credenciales or not credenciales.get("apiKey"):
+            config_ia = getattr(ctx.crm, "credenciales_llm", lambda: None)()
+            if not config_ia:
                 logger.warning(
-                    "followup %s: sin credenciales de IA — omitido",
+                    "followup %s: el CRM no ofrece IA — omitido",
                     conv.wa_identity,
                 )
                 return
-            ctx = replace(ctx, llm=ctx.registro.llm(credenciales, ctx.settings))
+            ctx = replace(
+                ctx,
+                llm=ctx.registro.llm(
+                    conv.organization_id,
+                    conv.organization_slug,
+                    config_ia,
+                    ctx.settings,
+                ),
+            )
 
         system = build_system_prompt(
             profile=await resolve_profile(ctx),

@@ -89,10 +89,12 @@ clave de LLM son los de él.
   todo despacho, y de él se **deriva** la credencial de cada negocio:
   `HMAC-SHA256(secreto, "vocero:cerebro:v1:{organizationId}")` en base64url.
   Nea la calcula; el CRM no se la manda.
-- **Cada negocio paga su propio consumo.** Su clave de OpenRouter y su modelo
-  llegan con el contexto de cada conversación, así que el gasto cae en la
-  cuenta de su dueño y no en la de quien hospeda. Sin esa clave Nea se calla y
-  deja la conversación a un humano, en vez de cobrarla a la cuenta equivocada.
+- **Cada negocio paga su propio consumo, y su clave no llega hasta aquí.**
+  Quien piensa es el CRM: Nea le pide por `/api/brains/llm` —un endpoint
+  compatible con OpenAI— y él le pone la credencial de esa organización al
+  reenviar al proveedor. Una llave que no viaja no se filtra, y cuando el
+  proveedor la rechaza el 401 lo recibe quien puede avisarle a su dueño.
+  Si el CRM no ofrece pensar, Nea se calla y deja la conversación a un humano.
 - **Las conversaciones no se cruzan.** La clave es (organización, identidad):
   la misma persona puede escribirle a dos negocios sin que el historial de uno
   aparezca en el prompt del otro.

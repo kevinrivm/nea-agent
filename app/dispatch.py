@@ -202,13 +202,15 @@ async def _contexto_multiorg(
         await _a_humano(cliente, conversation_id)
         return None
 
-    credenciales = cliente.credenciales_llm()
-    if not credenciales or not credenciales.get("apiKey"):
-        # Sin llave del miembro NO se piensa. Caer a la del entorno sería
-        # cobrarle a la cuenta del dueño de la plataforma el consumo de todos
-        # sus miembros — exactamente lo que este modo existe para evitar.
+    config_ia = cliente.credenciales_llm()
+    if not config_ia:
+        # El CRM no ofrece pensar por esta organización. O este despliegue no
+        # es de confianza, o el miembro no tiene token activo. En los dos
+        # casos hay que callarse: pensar con la llave del entorno le cobraría
+        # a la cuenta del dueño de la plataforma el consumo de sus miembros,
+        # que es justo lo que este modo existe para evitar.
         logger.warning(
-            "%s: sin credenciales de IA para %s; token inactivo o "
+            "%s: el CRM no ofrece IA para %s; token inactivo o "
             "despliegue no confiable — sin turno",
             slug,
             conversation_id,
@@ -219,7 +221,7 @@ async def _contexto_multiorg(
     return replace(
         ctx,
         crm=cliente,
-        llm=registro.llm(credenciales, ctx.settings),
+        llm=registro.llm(org_id, slug, config_ia, ctx.settings),
         profile=registro.perfil(org_id, slug),
         organizacion=(org_id, slug),
     )

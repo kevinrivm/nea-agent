@@ -71,8 +71,9 @@ class BrainsCrmClient(CrmClient):
         # turno — y para que el perfil sea el de la conversación que se está
         # atendiendo, no el de una petición suelta.
         self._perfil: dict[str, Any] | None = None
-        # Las credenciales de IA del MIEMBRO, tal como vinieron en el
-        # ultimo contexto. Solo llegan si el CRM considera de confianza a
+        # Como puede pensar esta organizacion: la ruta por la que el CRM
+        # piensa por Nea, y que modelos acepta. NO trae ninguna llave — esa
+        # se queda en el CRM. Solo llega si el CRM considera de confianza a
         # este despliegue; si no, se queda en None y el turno no corre.
         self._llm: dict[str, Any] | None = None
         # Contexto ya traido para una conversacion, pendiente de consumir.
@@ -109,7 +110,12 @@ class BrainsCrmClient(CrmClient):
         return data
 
     def credenciales_llm(self) -> dict[str, Any] | None:
-        """Las del ultimo contexto. None = el CRM no las entrego."""
+        """La configuracion de IA del ultimo contexto.
+
+        None = el CRM no ofrece pensar por esta organizacion (este despliegue
+        no es de confianza, o el miembro no tiene token activo). Las dos se
+        tratan igual: sin turno, y la conversacion a un humano.
+        """
         return self._llm
 
     def _request(self, method: str, url: str, **kwargs: Any):  # type: ignore[override]

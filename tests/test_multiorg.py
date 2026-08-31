@@ -118,35 +118,84 @@ def test_el_registro_reutiliza_el_cliente_por_organizacion():
     assert uno is not distinto
 
 
-def test_el_registro_cachea_el_llm_por_credencial():
-    """Cachear por credencial y no por organización: rotar la llave debe surtir
-    efecto en el turno siguiente, sin invalidar nada a mano."""
+def test_el_llm_apunta_al_crm_y_no_al_proveedor():
+    """La llave del miembro NO viaja: piensa el CRM y Nea le pide.
+
+    Es la propiedad de la que cuelga todo el diseño. Si esto se rompiera y el
+    cliente volviera a apuntar a OpenRouter, haría falta una llave de verdad —
+    y la única a mano sería la del entorno, o sea la del dueño de la
+    plataforma pagando por todos.
+    """
     reg = RegistroDeOrganizaciones("http://crm", SECRETO)
-    ajustes = Settings(llm_model="modelo/base", llm_transcribe_model="oye/algo")
-    base = {"apiKey": "sk-1", "model": "a/b", "baseUrl": "http://x/v1"}
-
-    primero = reg.llm(base, ajustes)
-    assert reg.llm(dict(base), ajustes) is primero
-
-    rotada = {**base, "apiKey": "sk-2"}
-    assert reg.llm(rotada, ajustes) is not primero
-
-
-def test_el_llm_rellena_huecos_con_los_ajustes_menos_la_llave():
-    """Sin modelo elegido se usa el de la instancia. Sin llave NO se rellena:
-    pensar con la del dueño de la plataforma es el gasto que esto evita."""
-    reg = RegistroDeOrganizaciones("http://crm", SECRETO)
-    ajustes = Settings(
-        llm_api_key="sk-del-dueño",
-        llm_model="modelo/instancia",
-        llm_transcribe_model="oye/instancia",
+    ajustes = Settings(llm_api_key="sk-del-dueño", llm_model="modelo/instancia")
+    cliente = reg.llm(
+        ORG, "mi-negocio", {"path": "/api/brains/llm", "model": "a/b"}, ajustes
     )
-    cliente = reg.llm({"apiKey": "sk-del-miembro"}, ajustes)
-    assert cliente._model == "modelo/instancia"
-    assert cliente._transcribe_model == "oye/instancia"
-    # La llave es la del miembro, jamás la del entorno.
-    assert cliente._client.api_key == "sk-del-miembro"
 
+    assert str(cliente._client.base_url).startswith("http://crm/api/brains/llm")
+    # La credencial derivada, no una llave de OpenRouter.
+    assert cliente._client.api_key == credencial_derivada(SECRETO, ORG)
+    assert "sk-del-dueño" not in str(cliente._client.api_key)
+
+
+def test_el_llm_dice_de_que_organizacion_es_cada_llamada():
+    """El CRM lo necesita para autenticar: sin la cabecera son todas 401."""
+    reg = RegistroDeOrganizaciones("http://crm", SECRETO)
+    cliente = reg.llm(ORG, "mi-negocio", {"model": "a/b"}, Settings())
+    cabeceras = cliente._client.default_headers or {}
+    assert cabeceras.get("X-Vocero-Organization") == "mi-negocio"
+
+
+def test_el_modelo_que_conversa_cae_al_de_la_instancia():
+    """Un miembro que no eligió modelo tiene que poder conversar igual."""
+    reg = RegistroDeOrganizaciones("http://crm", SECRETO)
+    ajustes = Settings(llm_model="modelo/instancia")
+    cliente = reg.llm(ORG, "mi-negocio", {}, ajustes)
+    assert cliente._model == "modelo/instancia"
+
+
+def test_el_modelo_que_escucha_NO_cae_a_ninguno():
+    """Sin modelo que oiga, no se transcribe. Y se dice.
+
+    Caer al que conversa mandaría el audio a un modelo que no oye, y lo que
+    volviera parecería una transcripción sin serlo. Quien la lea no tiene cómo
+    saber que es inventada — es peor que decir que no se pudo.
+    """
+    reg = RegistroDeOrganizaciones("http://crm", SECRETO)
+    ajustes = Settings(llm_transcribe_model="oye/instancia")
+    cliente = reg.llm(ORG, "mi-negocio", {"model": "a/b"}, ajustes)
+    assert cliente._transcribe_model == ""
+
+
+@pytest.mark.asyncio
+async def test_sin_modelo_que_oiga_transcribir_falla_sin_llamar_a_nadie():
+    """El guardarraíl del caso anterior, en el sitio donde muerde."""
+    from app.llm import LlmExhausted, OpenAiLlm
+
+    cliente = OpenAiLlm("cred", "a/b", transcribe_model="", base_url="http://crm")
+    with pytest.raises(LlmExhausted, match="sin modelo de transcripción"):
+        await cliente.transcribe(b"...", "audio/ogg")
+
+
+def test_el_registro_cachea_el_llm_pero_no_entre_organizaciones():
+    """Reutilizar el cliente ahorra sockets; compartirlo entre negocios
+    los mezclaría, porque cada uno lleva su credencial y su cabecera.
+    """
+    reg = RegistroDeOrganizaciones("http://crm", SECRETO)
+    config = {"model": "a/b"}
+    uno = reg.llm("org_1", "uno", dict(config), Settings())
+    otra_vez = reg.llm("org_1", "uno", dict(config), Settings())
+    de_otro = reg.llm("org_2", "dos", dict(config), Settings())
+    assert uno is otra_vez
+    assert uno is not de_otro
+
+
+def test_cambiar_de_modelo_surte_efecto_en_el_turno_siguiente():
+    """Sin invalidar nada a mano: la tupla de caché cambia con el modelo."""
+    reg = RegistroDeOrganizaciones("http://crm", SECRETO)
+    antes = reg.llm(ORG, "n", {"model": "a/b"}, Settings())
+    despues = reg.llm(ORG, "n", {"model": "c/d"}, Settings())
+    assert antes is not despues
 
 # --------------------------------------------------- el centinela ----------
 
