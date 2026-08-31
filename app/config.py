@@ -60,6 +60,27 @@ class Settings(BaseSettings):
     # "Escribiendo…" casi inmediato al recibir un mensaje (antes del coalesce).
     typing_delay_seconds: float = 0.5
 
+    # ── Modo cloud (Vocero multitenant) ───────────────────────────────
+    #
+    # Vacío = comportamiento de SIEMPRE: Meta manda el webhook a Nea, Nea lo
+    # relaya al CRM y habla con `/api/bot/*`. Ninguna instalación existente
+    # cambia por añadir esto, y ninguna variable nueva es obligatoria.
+    #
+    # `cloud` = Nea vive detrás de un Vocero multitenant: el CRM ya recibió el
+    # mensaje y se lo DESPACHA a Nea firmado, y Nea contesta por
+    # `/api/brains/*`. Una sola Nea sirve a muchos negocios, y cada uno trae su
+    # personalidad desde SU CRM.
+    vocero_mode: str = ""
+
+    # Secreto del cerebro, el que genera el CRM en Ajustes → Cerebro. Firma lo
+    # que llega y autentica lo que sale: el mismo secreto en las dos
+    # direcciones, como en el contrato.
+    crm_brain_secret: str = ""
+
+    # Slug de la organización. Solo se usa para acompañar al secreto; el CRM
+    # verifica que coincidan, así que no sirve de nada acertar uno sin el otro.
+    crm_organization: str = ""
+
     # Infra
     database_url: str = ""
     port: int = 8000
@@ -67,6 +88,16 @@ class Settings(BaseSettings):
     # Desarrollo: loguear el JSON crudo de mensajes no-texto entrantes para
     # capturar los formatos reales de Meta (spec 002). Apagar al terminar.
     capture_payloads: bool = False
+
+    @property
+    def cloud_mode(self) -> bool:
+        """¿Nea corre detrás de un Vocero multitenant?
+
+        Se compara en minúsculas y sin espacios para que un `Cloud ` copiado
+        de una consola no deje a nadie preguntándose por qué no arrancó en el
+        modo que pidió.
+        """
+        return self.vocero_mode.strip().lower() == "cloud"
 
     @staticmethod
     def _identities(csv: str) -> frozenset[str]:

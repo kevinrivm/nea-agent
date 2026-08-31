@@ -60,6 +60,27 @@ Herramientas del LLM: `update_ficha` (calificación), `propose_slots` /
 `book_session` (agenda), `route_out` (no califica; comparte los recursos
 alternativos del perfil), `handoff` (pausa la IA en el CRM).
 
+### Modo cloud (opcional): detrás de un Vocero multitenant
+
+Con `VOCERO_MODE=cloud` el camino se invierte — el CRM recibe el mensaje y se
+lo despacha a Nea:
+
+```
+Meta ──► Vocero CRM (multitenant)
+             │  el mensaje YA está en la bandeja
+             ▼  POST /vocero/dispatch (firmado con el secreto de la org)
+           Nea
+             └─ contesta por POST {CRM}/api/brains/* con ese mismo secreto
+```
+
+Una sola Nea sirve a muchos negocios, y **cada uno trae su personalidad desde
+SU CRM**: nombre, tono, instrucciones y conocimiento salen del contexto de la
+conversación, no del código ni del brief local.
+
+Sin la bandera no cambia nada: el webhook de Meta, el relay y `/api/bot/*`
+siguen siendo los de siempre. Las variables del modo cloud están en
+`.env.example`.
+
 ## Quickstart
 
 Requisitos: Python 3.11+, Postgres propio (no el del CRM), una instancia de
