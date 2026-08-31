@@ -82,12 +82,18 @@ class OpenAiLlm:
         model: str,
         transcribe_model: str = "whisper-1",
         base_url: str | None = None,
+        default_headers: dict[str, str] | None = None,
     ) -> None:
         # base_url ≠ None → proveedor OpenAI-compatible (p. ej. OpenRouter,
         # para el bench de modelos del 002). Ojo: la transcripción de audio
         # es una API de OpenAI — con otro proveedor degrada honesta
         # (LlmExhausted → fallback), por eso el bench alterno cubre texto.
-        self._client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+        # `default_headers` lo usa el modo multi-organización: cuando quien
+        # piensa es el CRM (y no OpenRouter directo), hay que decirle de qué
+        # organización es cada llamada.
+        self._client = AsyncOpenAI(
+            api_key=api_key, base_url=base_url, default_headers=default_headers
+        )
         self._model = model
         self._transcribe_model = transcribe_model
         # Con proveedor propio (OpenRouter y compañía) no hay endpoint de
@@ -112,6 +118,13 @@ class OpenAiLlm:
           audio. Ojo: el modelo que conversa y el que oye no tienen por qué
           ser el mismo — hoy los GLM, por ejemplo, no oyen.
         """
+        # Sin modelo que oiga no se intenta siquiera. Mandar el audio al que
+        # conversa devolvería una alucinación con pinta de transcripción, que
+        # es peor que decir que no se pudo: quien la lee no sabe que es falsa.
+        if not self._transcribe_model:
+            raise LlmExhausted(
+                "sin modelo de transcripción configurado — no se transcribe"
+            )
         if self._audio_por_chat:
             return await self._transcribir_por_chat(data, mime)
         last_error: Exception | None = None

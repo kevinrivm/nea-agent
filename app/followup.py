@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import replace
 from datetime import datetime
 from typing import Any
 
@@ -17,6 +18,7 @@ from app.llm import LlmExhausted
 from app.profile import resolve_profile
 from app.prompt import FOLLOWUP_INSTRUCTION, build_system_prompt
 from app.state import AppContext, Conversation, utcnow
+from app.multiorg import ctx_de_organizacion
 from app.turn import conversation_lock
 from app.turn import _agent_tz
 
@@ -50,8 +52,20 @@ class FollowupWorker:
                 # el Store puede devolver el mismo objeto vivo (MemoryStore) y
                 # compararlo contra sí mismo no detectaría nada.
                 ultimo_inbound = conv.last_inbound_at
+                # De quién es esta conversación. El seguimiento despierta
+                # horas después del turno, cuando ya no hay despacho del que
+                # sacarlo: sale de la fila misma.
+                ctx = ctx_de_organizacion(
+                    self._ctx, conv.organization_id, conv.organization_slug
+                )
+                if ctx is None:
+                    logger.error(
+                        "followup %s: sin organización conocida — omitido",
+                        conv.wa_identity,
+                    )
+                    continue
                 async with conversation_lock(self._ctx, conv.wa_identity):
-                    await self._push(conv, ultimo_inbound)
+                    await self._push(ctx, conv, ultimo_inbound)
             except Exception:
                 logger.exception(
                     "followup de %s falló — queda consumido (a lo sumo uno)",
@@ -59,18 +73,30 @@ class FollowupWorker:
                 )
 
     async def _push(
-        self, conv: Conversation, ultimo_inbound: datetime | None
+        self,
+        ctx: AppContext,
+        conv: Conversation,
+        ultimo_inbound: datetime | None,
     ) -> None:
-        ctx = self._ctx
         # Si mientras esperábamos el candado el lead escribió, el empujón sobra:
         # ya hay conversación viva y "¿seguimos?" quedaría fuera de lugar.
-        fresca = await ctx.store.get_or_create_conversation(conv.wa_identity)
+        fresca = await ctx.store.get_or_create_conversation(
+            conv.wa_identity, conv.organization_id, conv.organization_slug
+        )
         if fresca.last_inbound_at != ultimo_inbound:
             logger.info(
                 "followup %s: el lead escribió mientras tanto — omitido",
                 conv.wa_identity,
             )
             return
+        # Tras un reinicio, el cliente del CRM no recuerda qué conversación
+        # es cuál —esa memoria la llena el despacho, y aquí no hay despacho—,
+        # así que se la devolvemos desde lo que Nea sí guardó. Sin esto, todo
+        # seguimiento posterior a un redespliegue se omitía por "sin contexto".
+        registrar = getattr(ctx.crm, "registrar", None)
+        if callable(registrar) and conv.crm_conversation_id:
+            registrar(conv.wa_identity, conv.crm_conversation_id)
+
         try:
             context = await ctx.crm.get_context(conv.wa_identity)
         except CrmError as exc:
@@ -93,6 +119,28 @@ class FollowupWorker:
                 conv.wa_identity,
             )
             return
+
+        # El empujón se piensa a cuenta de SU miembro, igual que el turno: por
+        # el CRM, con la credencial de esta organización. Si el CRM no ofrece
+        # pensar, no se piensa — usar la llave del entorno le cobraría al
+        # dueño de la plataforma el consumo de sus miembros.
+        if ctx.settings.multi_org:
+            config_ia = getattr(ctx.crm, "credenciales_llm", lambda: None)()
+            if not config_ia:
+                logger.warning(
+                    "followup %s: el CRM no ofrece IA — omitido",
+                    conv.wa_identity,
+                )
+                return
+            ctx = replace(
+                ctx,
+                llm=ctx.registro.llm(
+                    conv.organization_id,
+                    conv.organization_slug,
+                    config_ia,
+                    ctx.settings,
+                ),
+            )
 
         system = build_system_prompt(
             profile=await resolve_profile(ctx),

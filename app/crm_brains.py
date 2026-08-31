@@ -71,10 +71,52 @@ class BrainsCrmClient(CrmClient):
         # turno — y para que el perfil sea el de la conversación que se está
         # atendiendo, no el de una petición suelta.
         self._perfil: dict[str, Any] | None = None
+        # Como puede pensar esta organizacion: la ruta por la que el CRM
+        # piensa por Nea, y que modelos acepta. NO trae ninguna llave — esa
+        # se queda en el CRM. Solo llega si el CRM considera de confianza a
+        # este despliegue; si no, se queda en None y el turno no corre.
+        self._llm: dict[str, Any] | None = None
+        # Contexto ya traido para una conversacion, pendiente de consumir.
+        # Lo llena `precargar` desde el despacho para que el turno no lo
+        # vuelva a pedir: una llamada HTTP por despacho, no dos.
+        self._precargado: dict[str, dict[str, Any]] = {}
 
     def registrar(self, identity: str, conversation_id: str) -> None:
         """Asocia una identidad con su conversación, desde el despacho."""
         self._conversaciones[identity] = conversation_id
+
+    async def precargar(self, conversation_id: str) -> dict[str, Any] | None:
+        """Trae el contexto AHORA y lo deja listo para el turno.
+
+        Existe por las credenciales de IA: el turno necesita saber con que
+        llave va a pensar ANTES de empezar a pensar, y esa llave viene en el
+        contexto. Sin esto habria que pedir el contexto dos veces por
+        despacho — una para las credenciales y otra dentro del turno.
+        """
+        resp = await self._request(
+            "GET", "/api/bot/context", params={"conversationId": conversation_id}
+        )
+        if resp.status_code != 200:
+            logger.warning(
+                "precarga del contexto de %s: el CRM respondio %s",
+                conversation_id,
+                resp.status_code,
+            )
+            return None
+        data: dict[str, Any] = resp.json()
+        self._perfil = _perfil_desde_contexto(data)
+        self._llm = data.get("llm") or None
+        self._precargado[conversation_id] = data
+        return data
+
+    def credenciales_llm(self) -> dict[str, Any] | None:
+        """La configuracion de IA del ultimo contexto.
+
+        None = el CRM no ofrece pensar por esta organizacion (este despliegue
+        no es de confianza, o el miembro no tiene token activo). Las dos se
+        tratan igual: sin turno, y la conversacion a un humano.
+        """
+        return self._llm
 
     def _request(self, method: str, url: str, **kwargs: Any):  # type: ignore[override]
         return super()._request(method, RUTAS.get(url, url), **kwargs)
@@ -98,6 +140,14 @@ class BrainsCrmClient(CrmClient):
             )
             return None
 
+        # Se consume UNA vez: asi el turno usa lo que ya se trajo en el
+        # despacho, pero un segundo turno de la misma conversacion vuelve a
+        # preguntar en vez de contestar con un contexto viejo.
+        precargado = self._precargado.pop(conversation_id, None)
+        if precargado is not None:
+            self._perfil = _perfil_desde_contexto(precargado)
+            return precargado
+
         resp = await self._request(
             "GET", "/api/bot/context", params={"conversationId": conversation_id}
         )
@@ -107,6 +157,7 @@ class BrainsCrmClient(CrmClient):
             raise CrmError(f"context devolvió {resp.status_code}")
         data: dict[str, Any] = resp.json()
         self._perfil = _perfil_desde_contexto(data)
+        self._llm = data.get("llm") or self._llm
         return data
 
     async def get_profile(self) -> dict[str, Any] | None:

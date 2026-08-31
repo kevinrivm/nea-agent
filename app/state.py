@@ -28,6 +28,14 @@ class Conversation:
     id: int
     wa_identity: str
     crm_conversation_id: str | None = None
+    # De quién es esta conversación. Cadena vacía = instalación de un solo
+    # negocio, que es lo que era todo antes del modo multi-organización.
+    #
+    # Importa más de lo que parece: la identidad SOLA dejó de identificar una
+    # conversación en cuanto una Nea atiende a varios negocios, porque la
+    # misma persona puede escribirle a dos.
+    organization_id: str = ""
+    organization_slug: str = ""
     phase: str = "descubrimiento"  # descubrimiento|insight|salida|agendando|cerrada
     greeted: bool = False
     media_notice_sent: bool = False
@@ -84,6 +92,11 @@ class PendingSend:
     next_retry_at: datetime
     delivered_at: datetime | None = None
     abandoned_at: datetime | None = None
+    # Para que el reintento diferido sepa con qué credencial hablarle al CRM
+    # cuando despierte. Van al final por la regla de los dataclass: un campo
+    # con valor por defecto no puede preceder a uno sin él.
+    organization_id: str = ""
+    organization_slug: str = ""
 
 
 @dataclass
@@ -127,7 +140,12 @@ class Store(Protocol):
     ) -> None: ...
 
     # conversaciones
-    async def get_or_create_conversation(self, wa_identity: str) -> Conversation: ...
+    async def get_or_create_conversation(
+        self,
+        wa_identity: str,
+        organization_id: str = "",
+        organization_slug: str = "",
+    ) -> Conversation: ...
     async def update_conversation(self, conversation_id: int, **fields: Any) -> None: ...
     async def reset_conversation(self, conversation_id: int) -> None:
         """Borra historial + slots y regresa la conversación a estado inicial
@@ -155,7 +173,12 @@ class Store(Protocol):
 
     # cola de envíos pendientes (respuestas que no pudieron salir en el turno)
     async def enqueue_pending_send(
-        self, conversation_id: int, crm_conversation_id: str, content: str
+        self,
+        conversation_id: int,
+        crm_conversation_id: str,
+        content: str,
+        organization_id: str = "",
+        organization_slug: str = "",
     ) -> int: ...
     async def due_pending_sends(self, now: datetime) -> list[PendingSend]: ...
     async def mark_pending_send_delivered(self, pending_id: int) -> None: ...
@@ -185,7 +208,7 @@ class MemoryStore:
         self.processed: set[str] = set()
         self.relays: dict[int, RelayItem] = {}
         self.conversations: dict[int, Conversation] = {}
-        self._conv_by_identity: dict[str, int] = {}
+        self._conv_by_identity: dict[tuple[str, str], int] = {}
         self.messages: list[BotMessage] = []
         self.offered: dict[int, list[OfferedSlot]] = {}
         self.pending_sends: dict[int, PendingSend] = {}
@@ -225,14 +248,25 @@ class MemoryStore:
         item.attempts = attempts
         item.next_retry_at = next_retry_at
 
-    async def get_or_create_conversation(self, wa_identity: str) -> Conversation:
-        cid = self._conv_by_identity.get(wa_identity)
+    async def get_or_create_conversation(
+        self,
+        wa_identity: str,
+        organization_id: str = "",
+        organization_slug: str = "",
+    ) -> Conversation:
+        clave = (organization_id, wa_identity)
+        cid = self._conv_by_identity.get(clave)
         if cid is not None:
             return self.conversations[cid]
         cid = next(self._ids)
-        conv = Conversation(id=cid, wa_identity=wa_identity)
+        conv = Conversation(
+            id=cid,
+            wa_identity=wa_identity,
+            organization_id=organization_id,
+            organization_slug=organization_slug,
+        )
         self.conversations[cid] = conv
-        self._conv_by_identity[wa_identity] = cid
+        self._conv_by_identity[clave] = cid
         return conv
 
     async def update_conversation(self, conversation_id: int, **fields: Any) -> None:
@@ -288,7 +322,12 @@ class MemoryStore:
         self.offered.pop(conversation_id, None)
 
     async def enqueue_pending_send(
-        self, conversation_id: int, crm_conversation_id: str, content: str
+        self,
+        conversation_id: int,
+        crm_conversation_id: str,
+        content: str,
+        organization_id: str = "",
+        organization_slug: str = "",
     ) -> int:
         pid = next(self._ids)
         now = utcnow()
@@ -296,6 +335,8 @@ class MemoryStore:
             id=pid, conversation_id=conversation_id,
             crm_conversation_id=crm_conversation_id, content=content,
             attempts=0, created_at=now, next_retry_at=now,
+            organization_id=organization_id,
+            organization_slug=organization_slug,
         )
         return pid
 
@@ -354,6 +395,13 @@ class AppContext:
     crm: Any  # CrmClient
     llm: Any  # OpenAiLlm o fake con .complete()
     profile: Any | None = None  # ProfileProvider; None en tests = perfil mínimo
+    # Modo multi-organización: el registro de clientes por organización.
+    # None fuera de ese modo — una Nea de un solo negocio no lo necesita, y
+    # que sea None es lo que hace evidente en qué modo está corriendo.
+    registro: Any | None = None  # RegistroDeOrganizaciones
+    # (organization_id, slug) del turno en curso. La pone el despacho al armar
+    # el contexto del turno; None fuera del modo multi-organización.
+    organizacion: tuple[str, str] | None = None
     coalescer: Any | None = None
     relay_wake: asyncio.Event = field(default_factory=asyncio.Event)
     # ¿El CRM de esta instancia tiene motor de agenda? Vocero lo trae detrás de

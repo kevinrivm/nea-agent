@@ -107,7 +107,12 @@ async def run_turn(
         )
         return
 
-    conv = await ctx.store.get_or_create_conversation(identity)
+    # La conversación es de una ORGANIZACIÓN, no solo de una identidad. Con
+    # una Nea de un solo negocio la tupla es vacía y todo queda igual que
+    # siempre; con varias, es lo que impide que el mismo teléfono escribiendo
+    # a dos negocios comparta historial. Ver migrations/004_multiorg.sql.
+    org_id, org_slug = ctx.organizacion or ("", "")
+    conv = await ctx.store.get_or_create_conversation(identity, org_id, org_slug)
 
     # --- Comando /reset (líneas de prueba) --------------------------------
     # Corre ANTES de los gates de aiEnabled/ventana: un reset también debe
@@ -393,7 +398,13 @@ async def _send(ctx: AppContext, conv_id: int, crm_conv_id: str, text: str) -> b
             logger.warning("envío falló (intento %d): %s", attempt + 1, exc)
             if attempt < SEND_ATTEMPTS - 1:
                 await asyncio.sleep(2.0**attempt)
-    pending_id = await ctx.store.enqueue_pending_send(conv_id, crm_conv_id, text)
+    # La organización viaja con el encolado: cuando el SenderWorker despierte
+    # —quizá horas después— tiene que hablarle al CRM con la credencial de
+    # ESTA, y para entonces el turno ya no existe.
+    org_id, org_slug = ctx.organizacion or ("", "")
+    pending_id = await ctx.store.enqueue_pending_send(
+        conv_id, crm_conv_id, text, org_id, org_slug
+    )
     logger.error(
         "envío agotó reintentos del turno — encolado como pending_send %d",
         pending_id,

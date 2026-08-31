@@ -110,8 +110,14 @@ class Settings(BaseSettings):
     #
     # `cloud` = Nea vive detrás de un Vocero multitenant: el CRM ya recibió el
     # mensaje y se lo DESPACHA a Nea firmado, y Nea contesta por
-    # `/api/brains/*`. Una sola Nea sirve a muchos negocios, y cada uno trae su
-    # personalidad desde SU CRM.
+    # `/api/brains/*`. Su personalidad y su conocimiento vienen de SU CRM.
+    #
+    # **Una instancia atiende a UNA organización.** `crm_brain_secret`,
+    # `crm_organization` y `llm_api_key` son valores únicos: un despacho de
+    # otra organización vendría firmado con otro secreto y se rechazaría con
+    # 401. Falla cerrado —no mezcla conversaciones ajenas ni le carga el token
+    # de un negocio a otro—, pero atender a varios negocios hoy significa una
+    # instancia por negocio.
     vocero_mode: str = ""
 
     # Secreto del cerebro, el que genera el CRM en Ajustes → Cerebro. Firma lo
@@ -121,6 +127,12 @@ class Settings(BaseSettings):
 
     # Slug de la organización. Solo se usa para acompañar al secreto; el CRM
     # verifica que coincidan, así que no sirve de nada acertar uno sin el otro.
+    #
+    # **VACÍA en modo cloud = multi-organización.** Entonces esta Nea no
+    # sirve a un negocio sino a todos los que el CRM le suscriba: cada
+    # despacho dice de quién es, y la credencial para contestar se DERIVA del
+    # secreto del despliegue (app/multiorg.py). Es lo que evita levantar un
+    # contenedor por negocio.
     crm_organization: str = ""
 
     # Infra
@@ -140,6 +152,17 @@ class Settings(BaseSettings):
         en vez de dejar que se descubra con un cliente esperando respuesta.
         """
         return bool(self.llm_base_url) and self.llm_transcribe_model == "whisper-1"
+
+    @property
+    def multi_org(self) -> bool:
+        """¿Esta Nea atiende a varias organizaciones?
+
+        Cloud + sin slug fijo. Se pide la ausencia de `crm_organization` y no
+        una bandera nueva porque las dos cosas se contradicen: un slug fijo
+        significa «solo este negocio», y una bandera aparte permitiría
+        pedir las dos a la vez y dejar sin definir cuál gana.
+        """
+        return self.cloud_mode and not self.crm_organization.strip()
 
     @property
     def cloud_mode(self) -> bool:
