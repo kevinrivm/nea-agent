@@ -10,6 +10,7 @@ Gotchas del brief que se honran aquí:
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 from dataclasses import dataclass, field
@@ -49,6 +50,29 @@ class Llm(Protocol):
     ) -> str: ...
 
 
+# Los proveedores compatibles piden el formato aparte del binario. WhatsApp
+# manda notas de voz en OGG/Opus; el resto se deduce del mime y, si no se
+# reconoce, se manda como ogg en vez de fallar antes de intentarlo.
+_FORMATOS = {
+    "audio/ogg": "ogg",
+    "audio/opus": "ogg",
+    "audio/mpeg": "mp3",
+    "audio/mp3": "mp3",
+    "audio/mp4": "m4a",
+    "audio/m4a": "m4a",
+    "audio/x-m4a": "m4a",
+    "audio/wav": "wav",
+    "audio/x-wav": "wav",
+    "audio/webm": "webm",
+    "audio/flac": "flac",
+    "audio/aac": "aac",
+}
+
+
+def _formato_de_audio(mime: str) -> str:
+    return _FORMATOS.get((mime or "").split(";")[0].strip().lower(), "ogg")
+
+
 class OpenAiLlm:
     RETRIES = 2  # además del intento inicial
 
@@ -66,6 +90,11 @@ class OpenAiLlm:
         self._client = AsyncOpenAI(api_key=api_key, base_url=base_url)
         self._model = model
         self._transcribe_model = transcribe_model
+        # Con proveedor propio (OpenRouter y compañía) no hay endpoint de
+        # transcripción: el audio se manda DENTRO del chat, a un modelo que
+        # sepa oír. Se decide aquí y no en cada llamada para que el camino sea
+        # el mismo durante toda la vida del proceso.
+        self._audio_por_chat = base_url is not None
         # Contadores de uso (para el bench de costos del 002): tokens reales
         # reportados por el proveedor, acumulados por instancia.
         self.usage = {"prompt": 0, "cached": 0, "completion": 0, "llamadas": 0}
@@ -73,7 +102,18 @@ class OpenAiLlm:
     async def transcribe(
         self, data: bytes, mime: str, filename: str = "audio.ogg"
     ) -> str:
-        """Audio → texto (API de transcripción). Vacío/fallo → LlmExhausted."""
+        """Audio → texto. Vacío o fallo → LlmExhausted.
+
+        Dos caminos, porque los proveedores no ofrecen lo mismo:
+
+        - **OpenAI**: endpoint propio de transcripción (whisper).
+        - **Compatible** (OpenRouter…): no existe ese endpoint. El audio va
+          codificado DENTRO de un mensaje de chat, a un modelo que acepte
+          audio. Ojo: el modelo que conversa y el que oye no tienen por qué
+          ser el mismo — hoy los GLM, por ejemplo, no oyen.
+        """
+        if self._audio_por_chat:
+            return await self._transcribir_por_chat(data, mime)
         last_error: Exception | None = None
         content_type = (mime or "audio/ogg").split(";")[0].strip()
         for attempt in range(2):
@@ -91,6 +131,61 @@ class OpenAiLlm:
             except Exception as exc:
                 last_error = exc
                 logger.warning("transcribe: fallo en intento %d: %s", attempt + 1, exc)
+            if attempt == 0:
+                await asyncio.sleep(1.0)
+        raise LlmExhausted(str(last_error))
+
+    async def _transcribir_por_chat(self, data: bytes, mime: str) -> str:
+        """El audio, en base64, dentro de un mensaje de chat.
+
+        Es como transcriben los proveedores compatibles: no hay endpoint de
+        audio, hay modelos que oyen. Se le pide el texto y NADA más — sin esa
+        instrucción, un modelo servicial contesta a lo que dijo el cliente en
+        vez de transcribirlo, y Nea acabaría respondiendo a su propia
+        paráfrasis.
+        """
+        fmt = _formato_de_audio(mime)
+        b64 = base64.b64encode(data).decode()
+        last_error: Exception | None = None
+
+        for attempt in range(2):
+            try:
+                resp = await self._client.chat.completions.create(
+                    model=self._transcribe_model,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": (
+                                        "Transcribe este audio al español. "
+                                        "Responde SOLO con la transcripción "
+                                        "literal, sin comillas, sin comentarios "
+                                        "y sin responder a lo que dice."
+                                    ),
+                                },
+                                {
+                                    "type": "input_audio",
+                                    "input_audio": {"data": b64, "format": fmt},
+                                },
+                            ],
+                        }
+                    ],
+                )
+                text = (resp.choices[0].message.content or "").strip()
+                if text:
+                    return text
+                last_error = ValueError("transcripción vacía")
+                logger.warning("transcribe(chat): vacío, intento %d", attempt + 1)
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "transcribe(chat) con %s: fallo en intento %d: %s",
+                    self._transcribe_model,
+                    attempt + 1,
+                    exc,
+                )
             if attempt == 0:
                 await asyncio.sleep(1.0)
         raise LlmExhausted(str(last_error))

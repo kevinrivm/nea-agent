@@ -74,9 +74,10 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 store=store,
                 crm=crm,
                 llm=OpenAiLlm(
-                    settings.openai_api_key,
-                    settings.openai_model,
-                    transcribe_model=settings.openai_transcribe_model,
+                    settings.llm_api_key,
+                    settings.llm_model,
+                    transcribe_model=settings.llm_transcribe_model,
+                    base_url=settings.llm_base_url or None,
                 ),
                 profile=ProfileProvider(
                     crm,
@@ -86,6 +87,14 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             )
         c: AppContext = app.state.ctx
         _wire_coalescer(c)
+
+        if c.settings.audio_mal_configurado:
+            logger.warning(
+                "OPENAI_BASE_URL apunta a otro proveedor pero "
+                "OPENAI_TRANSCRIBE_MODEL sigue en 'whisper-1', que solo existe "
+                "en OpenAI: las notas de voz van a fallar. Pon ahí un modelo "
+                "que acepte audio (no todos oyen — los GLM, por ejemplo, no)."
+            )
 
         if own_resources:
             # ¿Este CRM agenda? Vocero trae el motor detrás de una bandera de

@@ -325,3 +325,146 @@ class TestCliente:
         # No existe en esta superficie. Hacerlo estallar convertiría un comando
         # de pruebas en una caída del turno.
         await cliente.post_reset(CONV)
+
+
+# ── El proveedor del modelo ───────────────────────────────────────────────
+
+
+class TestProveedor:
+    def test_sin_base_url_es_OpenAI_como_siempre(self) -> None:
+        # La garantía para quien ya corre Nea: no cambia de proveedor por que
+        # esta variable exista.
+        assert Settings().llm_base_url == ""
+
+    def test_se_puede_apuntar_a_openrouter(self) -> None:
+        s = Settings(llm_base_url="https://openrouter.ai/api/v1")
+        assert s.llm_base_url == "https://openrouter.ai/api/v1"
+
+    def test_el_cliente_apunta_al_proveedor_configurado(self) -> None:
+        from app.llm import OpenAiLlm
+
+        llm = OpenAiLlm("k", "anthropic/claude-sonnet-4.5",
+                        base_url="https://openrouter.ai/api/v1")
+        assert "openrouter.ai" in str(llm._client.base_url)
+
+    def test_sin_base_url_el_cliente_va_a_openai(self) -> None:
+        from app.llm import OpenAiLlm
+
+        llm = OpenAiLlm("k", "gpt-4o-mini", base_url=None)
+        assert "openai.com" in str(llm._client.base_url)
+
+
+# ── Notas de voz con un proveedor que no es OpenAI ────────────────────────
+
+
+class TestAudio:
+    def test_con_openai_usa_el_endpoint_de_transcripcion(self) -> None:
+        from app.llm import OpenAiLlm
+
+        assert OpenAiLlm("k", "gpt-4o-mini")._audio_por_chat is False
+
+    def test_con_proveedor_propio_el_audio_va_por_el_chat(self) -> None:
+        # No hay endpoint de transcripción fuera de OpenAI: el audio viaja
+        # dentro de un mensaje, a un modelo que acepte audio.
+        from app.llm import OpenAiLlm
+
+        llm = OpenAiLlm("k", "m", base_url="https://openrouter.ai/api/v1")
+        assert llm._audio_por_chat is True
+
+    def test_el_formato_sale_del_mime(self) -> None:
+        from app.llm import _formato_de_audio
+
+        # WhatsApp manda las notas de voz en OGG/Opus.
+        assert _formato_de_audio("audio/ogg; codecs=opus") == "ogg"
+        assert _formato_de_audio("audio/mpeg") == "mp3"
+
+    def test_un_mime_desconocido_no_frena_el_intento(self) -> None:
+        # Mejor intentarlo como ogg que rendirse antes de probar.
+        from app.llm import _formato_de_audio
+
+        assert _formato_de_audio("audio/rarisimo") == "ogg"
+        assert _formato_de_audio("") == "ogg"
+
+    def test_whisper_con_otro_proveedor_se_detecta_al_arrancar(self) -> None:
+        # `whisper-1` no existe fuera de OpenAI: esa combinación hace fallar
+        # TODA nota de voz. Se avisa al arrancar, no con un cliente esperando.
+        s = Settings(llm_base_url="https://openrouter.ai/api/v1")
+        assert s.audio_mal_configurado is True
+
+    def test_bien_configurado_no_avisa(self) -> None:
+        s = Settings(
+            llm_base_url="https://openrouter.ai/api/v1",
+            llm_transcribe_model="google/gemini-2.5-flash",
+        )
+        assert s.audio_mal_configurado is False
+
+    def test_con_openai_nunca_avisa(self) -> None:
+        assert Settings().audio_mal_configurado is False
+
+    @respx.mock
+    async def test_transcribe_pidiendo_SOLO_el_texto(self) -> None:
+        # Sin esa instrucción, un modelo servicial contesta a lo que dijo el
+        # cliente en vez de transcribirlo, y Nea respondería a su propia
+        # paráfrasis.
+        from app.llm import OpenAiLlm
+
+        ruta = respx.post("https://prov.test/chat/completions").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {"message": {"role": "assistant", "content": "hola qué tal"}}
+                    ]
+                },
+            )
+        )
+        llm = OpenAiLlm("k", "chat-model", transcribe_model="oye-model",
+                        base_url="https://prov.test")
+        texto = await llm.transcribe(b"RIFF-audio-falso", "audio/ogg")
+
+        assert texto == "hola qué tal"
+        enviado = json.loads(ruta.calls.last.request.content)
+        assert enviado["model"] == "oye-model"  # el que OYE, no el que conversa
+        partes = enviado["messages"][0]["content"]
+        assert any(p["type"] == "input_audio" for p in partes)
+        assert "SOLO" in partes[0]["text"]
+
+
+# ── Los nombres de las variables ──────────────────────────────────────────
+
+
+class TestNombresDeVariables:
+    """Se renombraron a LLM_* porque el proveedor no tiene por qué ser OpenAI.
+
+    Los viejos siguen funcionando, y eso se COMPRUEBA: una variable que deja de
+    leerse no avisa —el bot arranca y se queda mudo—, así que la compatibilidad
+    no puede depender de que alguien se acuerde.
+    """
+
+    def test_los_nombres_nuevos(self, monkeypatch) -> None:
+        monkeypatch.setenv("LLM_API_KEY", "nueva")
+        monkeypatch.setenv("LLM_BASE_URL", "https://openrouter.ai/api/v1")
+        monkeypatch.setenv("LLM_MODEL", "z-ai/glm-5.3-flash")
+        monkeypatch.setenv("LLM_TRANSCRIBE_MODEL", "google/gemini-2.5-flash")
+        s = Settings(_env_file=None)
+        assert s.llm_api_key == "nueva"
+        assert s.llm_model == "z-ai/glm-5.3-flash"
+        assert s.llm_transcribe_model == "google/gemini-2.5-flash"
+
+    def test_los_nombres_VIEJOS_siguen_funcionando(self, monkeypatch) -> None:
+        # La garantía para toda instalación que ya corre.
+        monkeypatch.setenv("OPENAI_API_KEY", "vieja")
+        monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+        monkeypatch.setenv("OPENAI_MODEL", "gpt-4o-mini")
+        monkeypatch.setenv("OPENAI_TRANSCRIBE_MODEL", "whisper-1")
+        s = Settings(_env_file=None)
+        assert s.llm_api_key == "vieja"
+        assert s.llm_base_url == "https://api.openai.com/v1"
+        assert s.llm_model == "gpt-4o-mini"
+
+    def test_el_nombre_nuevo_gana_al_viejo(self, monkeypatch) -> None:
+        # Si alguien migra a medias, manda el nuevo: es el que puso a
+        # propósito, no el que quedó de antes.
+        monkeypatch.setenv("OPENAI_API_KEY", "vieja")
+        monkeypatch.setenv("LLM_API_KEY", "nueva")
+        assert Settings(_env_file=None).llm_api_key == "nueva"
