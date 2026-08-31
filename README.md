@@ -73,9 +73,15 @@ Meta ──► Vocero CRM (multitenant)
              └─ contesta por POST {CRM}/api/brains/* con ese mismo secreto
 ```
 
-Una sola Nea sirve a muchos negocios, y **cada uno trae su personalidad desde
-SU CRM**: nombre, tono, instrucciones y conocimiento salen del contexto de la
-conversación, no del código ni del brief local.
+**La misma Nea sirve a cualquier negocio sin tocarle una línea**: nombre, tono,
+instrucciones y conocimiento salen del contexto de la conversación, no del
+código ni del brief local. Cambiar el conocimiento en el CRM cambia lo que Nea
+responde, sin redesplegar nada.
+
+Pero **cada negocio corre su propia instancia**, con su secreto y su clave de
+LLM. No es una limitación: es lo que hace que el consumo de cada negocio lo
+pague su dueño y no quien hospeda. Una Nea compartida cargaría el gasto de
+todos a una sola cuenta.
 
 Sin la bandera no cambia nada: el webhook de Meta, el relay y `/api/bot/*`
 siguen siendo los de siempre. Las variables del modo cloud están en
