@@ -25,7 +25,11 @@ from app.dispatch import router as dispatch_router
 from app.db import PgStore
 from app.followup import FollowupWorker
 from app.llm import OpenAiLlm
-from app.multiorg import CrmSinOrganizacion, RegistroDeOrganizaciones
+from app.multiorg import (
+    CrmSinOrganizacion,
+    LlmSinOrganizacion,
+    RegistroDeOrganizaciones,
+)
 from app.profile import ProfileProvider
 from app.relay import RelayWorker
 from app.sender import SenderWorker
@@ -88,11 +92,20 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 settings=settings,
                 store=store,
                 crm=crm,
-                llm=OpenAiLlm(
-                    settings.llm_api_key,
-                    settings.llm_model,
-                    transcribe_model=settings.llm_transcribe_model,
-                    base_url=settings.llm_base_url or None,
+                # Mismo criterio que el CRM de arriba: en multi-organización
+                # no hay modelo por defecto. Además de que no habría con qué
+                # construirlo —Nea no lleva la llave de nadie—, uno de verdad
+                # aquí le cobraría al dueño de la plataforma el consumo de sus
+                # miembros si algún camino se olvidara de cambiarlo.
+                llm=(
+                    LlmSinOrganizacion()
+                    if settings.multi_org
+                    else OpenAiLlm(
+                        settings.llm_api_key,
+                        settings.llm_model,
+                        transcribe_model=settings.llm_transcribe_model,
+                        base_url=settings.llm_base_url or None,
+                    )
                 ),
                 # En multi-organización el perfil es de cada negocio y lo
                 # sirve el registro; un proveedor global aquí serviría el

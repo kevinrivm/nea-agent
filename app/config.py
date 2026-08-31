@@ -112,12 +112,13 @@ class Settings(BaseSettings):
     # mensaje y se lo DESPACHA a Nea firmado, y Nea contesta por
     # `/api/brains/*`. Su personalidad y su conocimiento vienen de SU CRM.
     #
-    # **Una instancia atiende a UNA organización.** `crm_brain_secret`,
-    # `crm_organization` y `llm_api_key` son valores únicos: un despacho de
-    # otra organización vendría firmado con otro secreto y se rechazaría con
-    # 401. Falla cerrado —no mezcla conversaciones ajenas ni le carga el token
-    # de un negocio a otro—, pero atender a varios negocios hoy significa una
-    # instancia por negocio.
+    # Con `crm_organization` puesta atiende a ESE negocio y a nadie más: un
+    # despacho de otra organización viene firmado con otro secreto y se
+    # rechaza con 401.
+    #
+    # Con `crm_organization` vacía atiende a todos los que el CRM le suscriba
+    # (ver `multi_org` más abajo). Entonces `llm_api_key` no se usa: la llave
+    # es de cada miembro y la pone el CRM, no viaja hasta aquí.
     vocero_mode: str = ""
 
     # Secreto del cerebro, el que genera el CRM en Ajustes → Cerebro. Firma lo

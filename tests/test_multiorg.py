@@ -12,15 +12,18 @@ Lo que se prueba aquí, en orden de importancia:
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
 
 import pytest
 
+from app import main
 from app.config import Settings
 from app.multiorg import (
     CrmSinOrganizacion,
+    LlmSinOrganizacion,
     RegistroDeOrganizaciones,
     credencial_derivada,
     ctx_de_organizacion,
@@ -288,3 +291,84 @@ async def test_sin_organizacion_se_comporta_como_siempre():
     una = await store.get_or_create_conversation("5215512345678")
     otra = await store.get_or_create_conversation("5215512345678")
     assert una.id == otra.id
+
+
+# ── El arranque ───────────────────────────────────────────────────────────
+#
+# Todo lo demás en esta suite construye el `AppContext` a mano. El arranque de
+# verdad —el que arma sus propios recursos— no lo cubría nadie, y ahí es donde
+# esto se rompió en producción: el proceso moría en el `lifespan` porque
+# intentaba construir un cliente del modelo sin llave. Y en este modo NO hay
+# llave a propósito.
+
+
+class _StoreDePrueba:
+    """Lo justo que el arranque le pide a la base."""
+
+    async def connect(self) -> None:
+        return None
+
+    async def migrate(self, _directorio) -> None:
+        return None
+
+    async def aclose(self) -> None:
+        return None
+
+
+class _WorkerQuieto:
+    """Un worker que no hace nada: aquí se prueba el arranque, no el trabajo."""
+
+    def __init__(self, *_args, **_kwargs) -> None:
+        pass
+
+    async def run(self) -> None:
+        await asyncio.Event().wait()
+
+    async def aclose(self) -> None:
+        return None
+
+
+@pytest.fixture
+def arranque_multiorg(monkeypatch):
+    """Producción tal cual: cloud, sin organización fija y sin llave de nadie."""
+    monkeypatch.setenv("VOCERO_MODE", "cloud")
+    monkeypatch.setenv("CRM_BASE_URL", "http://vocero-cloud:3000")
+    monkeypatch.setenv("CRM_BRAIN_SECRET", "secreto-del-despliegue-de-32-caracteres")
+    monkeypatch.setenv("DATABASE_URL", "postgres://no-se-usa")
+    # Vacías, no borradas: una variable borrada en Coolify llega aquí como el
+    # default (""), y un `.env` en el repo no debe poder salvar esta prueba
+    # dándole una llave que producción no tiene.
+    for ausente in ("CRM_ORGANIZATION", "LLM_API_KEY", "OPENAI_API_KEY"):
+        monkeypatch.setenv(ausente, "")
+    monkeypatch.setattr(main, "PgStore", lambda *_a, **_k: _StoreDePrueba())
+    monkeypatch.setattr(main, "RelayWorker", _WorkerQuieto)
+    monkeypatch.setattr(main, "FollowupWorker", _WorkerQuieto)
+    monkeypatch.setattr(main, "SenderWorker", _WorkerQuieto)
+
+
+async def test_el_arranque_multiorg_no_muere_sin_llave(arranque_multiorg):
+    """El fallo exacto que tiró el despliegue.
+
+    Sin este arreglo, el SDK de OpenAI se niega a construirse sin credencial
+    ("Missing credentials") y el proceso sale en el `lifespan`: contenedor
+    unhealthy, rollback, y Nea nunca arriba.
+    """
+    app = main.create_app()
+    async with app.router.lifespan_context(app):
+        ctx = app.state.ctx
+        assert ctx.settings.multi_org
+        assert isinstance(ctx.llm, LlmSinOrganizacion)
+
+
+async def test_el_modelo_del_arranque_revienta_al_usarse(arranque_multiorg):
+    """No degrada: revienta.
+
+    `LlmExhausted` haría que el turno siguiera su camino de "no pude pensar" y
+    un olvido de cableado se leería como un fallo del proveedor. Además, un
+    cliente de verdad aquí le cobraría al dueño de la plataforma el consumo de
+    sus miembros.
+    """
+    app = main.create_app()
+    async with app.router.lifespan_context(app):
+        with pytest.raises(RuntimeError, match="sin saber de qué organización"):
+            await app.state.ctx.llm.complete([{"role": "user", "content": "hola"}])
