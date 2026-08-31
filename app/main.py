@@ -88,6 +88,14 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         c: AppContext = app.state.ctx
         _wire_coalescer(c)
 
+        if c.settings.audio_mal_configurado:
+            logger.warning(
+                "OPENAI_BASE_URL apunta a otro proveedor pero "
+                "OPENAI_TRANSCRIBE_MODEL sigue en 'whisper-1', que solo existe "
+                "en OpenAI: las notas de voz van a fallar. Pon ahí un modelo "
+                "que acepte audio (no todos oyen — los GLM, por ejemplo, no)."
+            )
+
         if own_resources:
             # ¿Este CRM agenda? Vocero trae el motor detrás de una bandera de
             # despliegue y viene apagado por defecto. Se pregunta una vez, aquí,

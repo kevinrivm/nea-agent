@@ -55,7 +55,13 @@ class Settings(BaseSettings):
     # no se transcribe — Nea lo dice y pide que se lo escriban, en vez de
     # callarse. Si necesitas notas de voz, deja este campo vacío y usa OpenAI.
     openai_base_url: str = ""
-    openai_transcribe_model: str = "whisper-1"  # notas de voz → texto
+    # Notas de voz → texto. Con OpenAI es whisper. Con un proveedor propio NO
+    # hay endpoint de transcripción: hay que poner aquí un modelo que ACEPTE
+    # AUDIO, y el audio viaja dentro del chat.
+    #
+    # No tiene por qué ser el mismo que conversa: hoy los GLM, por ejemplo, no
+    # oyen. Uno conversa y otro escucha, con la misma clave.
+    openai_transcribe_model: str = "whisper-1"
     history_window: int = 10
 
     # Guardarraíles y tiempos
@@ -99,6 +105,16 @@ class Settings(BaseSettings):
     # Desarrollo: loguear el JSON crudo de mensajes no-texto entrantes para
     # capturar los formatos reales de Meta (spec 002). Apagar al terminar.
     capture_payloads: bool = False
+
+    @property
+    def audio_mal_configurado(self) -> bool:
+        """¿Proveedor propio con el modelo de audio de OpenAI?
+
+        `whisper-1` no existe fuera de OpenAI, así que esta combinación hace
+        que TODA nota de voz falle. Se detecta al arrancar y se avisa una vez,
+        en vez de dejar que se descubra con un cliente esperando respuesta.
+        """
+        return bool(self.openai_base_url) and self.openai_transcribe_model == "whisper-1"
 
     @property
     def cloud_mode(self) -> bool:
