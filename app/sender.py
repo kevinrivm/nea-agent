@@ -14,6 +14,7 @@ import logging
 from datetime import datetime, timedelta
 
 from app.crm import CrmConflict, CrmError
+from app.multiorg import ctx_de_organizacion
 from app.state import AppContext, PendingSend, utcnow
 
 logger = logging.getLogger("nea.sender")
@@ -39,18 +40,33 @@ class SenderWorker:
     async def tick(self, now: datetime | None = None) -> None:
         now = now or utcnow()
         for item in await self._ctx.store.due_pending_sends(now):
+            # Con quién hay que hablar para ESTA fila. En una Nea de un solo
+            # negocio es siempre el mismo; en una multi-organización, el de
+            # la organización que dejó el envío pendiente.
+            ctx = ctx_de_organizacion(
+                self._ctx, item.organization_id, item.organization_slug
+            )
+            if ctx is None:
+                logger.error(
+                    "sender: pending %d sin organización conocida — no puedo "
+                    "entregarlo sin arriesgarme a escribirle a otro negocio",
+                    item.id,
+                )
+                await self._ctx.store.mark_pending_send_abandoned(item.id)
+                continue
             if now - item.created_at > self.MAX_AGE:
                 logger.error(
                     "sender: pending %d agotó las 24 h sin entregar — abandonado + handoff",
                     item.id,
                 )
                 await self._ctx.store.mark_pending_send_abandoned(item.id)
-                await self._handoff(item.crm_conversation_id)
+                await self._handoff(ctx, item.crm_conversation_id)
                 continue
-            await self._attempt(item, now)
+            await self._attempt(ctx, item, now)
 
-    async def _attempt(self, item: PendingSend, now: datetime) -> None:
-        ctx = self._ctx
+    async def _attempt(
+        self, ctx: AppContext, item: PendingSend, now: datetime
+    ) -> None:
         try:
             await ctx.crm.send_message(item.crm_conversation_id, item.content)
         except CrmConflict as exc:
@@ -81,8 +97,8 @@ class SenderWorker:
         await ctx.store.add_message(item.conversation_id, "assistant", item.content)
         logger.info("sender: pending %d entregado", item.id)
 
-    async def _handoff(self, crm_conv_id: str) -> None:
+    async def _handoff(self, ctx: AppContext, crm_conv_id: str) -> None:
         try:
-            await self._ctx.crm.post_handoff(crm_conv_id, "error")
+            await ctx.crm.post_handoff(crm_conv_id, "error")
         except CrmError as exc:
             logger.error("sender: no pude registrar el handoff tras abandono: %s", exc)

@@ -41,6 +41,8 @@ def _conv_from_row(row: asyncpg.Record) -> Conversation:
         followup_sent=row["followup_sent"],
         last_inbound_at=row["last_inbound_at"],
         stalled_at=row["stalled_at"],
+        organization_id=row["organization_id"],
+        organization_slug=row["organization_slug"],
     )
 
 
@@ -112,6 +114,8 @@ class PgStore:
                 next_retry_at=r["next_retry_at"],
                 delivered_at=r["delivered_at"],
                 abandoned_at=r["abandoned_at"],
+                organization_id=r["organization_id"],
+                organization_slug=r["organization_slug"],
             )
             for r in rows
         ]
@@ -138,14 +142,31 @@ class PgStore:
 
     # ----------------------------------------------------- conversaciones ---
 
-    async def get_or_create_conversation(self, wa_identity: str) -> Conversation:
+    async def get_or_create_conversation(
+        self,
+        wa_identity: str,
+        organization_id: str = "",
+        organization_slug: str = "",
+    ) -> Conversation:
+        # El conflicto se resuelve contra (organization_id, wa_identity): la
+        # identidad sola dejó de identificar una conversación en cuanto una
+        # Nea atiende a varios negocios. Ver migrations/004_multiorg.sql.
+        #
+        # El slug se refresca en cada choque porque puede cambiar (un miembro
+        # renombra su subdominio) mientras el id no; guardarlo desactualizado
+        # haría que el worker de fondo hablara con una cabecera vieja.
         row = await self.pool.fetchrow(
             """
-            INSERT INTO bot_conversation (wa_identity) VALUES ($1)
-            ON CONFLICT (wa_identity) DO UPDATE SET updated_at = now()
+            INSERT INTO bot_conversation
+              (wa_identity, organization_id, organization_slug)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (organization_id, wa_identity) DO UPDATE
+              SET updated_at = now(), organization_slug = EXCLUDED.organization_slug
             RETURNING *
             """,
             wa_identity,
+            organization_id,
+            organization_slug,
         )
         assert row is not None
         return _conv_from_row(row)
@@ -276,16 +297,25 @@ class PgStore:
     # ------------------------------------------------- envíos pendientes ---
 
     async def enqueue_pending_send(
-        self, conversation_id: int, crm_conversation_id: str, content: str
+        self,
+        conversation_id: int,
+        crm_conversation_id: str,
+        content: str,
+        organization_id: str = "",
+        organization_slug: str = "",
     ) -> int:
         row = await self.pool.fetchrow(
             """
-            INSERT INTO pending_send (conversation_id, crm_conversation_id, content)
-            VALUES ($1, $2, $3) RETURNING id
+            INSERT INTO pending_send
+              (conversation_id, crm_conversation_id, content,
+               organization_id, organization_slug)
+            VALUES ($1, $2, $3, $4, $5) RETURNING id
             """,
             conversation_id,
             crm_conversation_id,
             content,
+            organization_id,
+            organization_slug,
         )
         assert row is not None
         return row["id"]

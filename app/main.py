@@ -25,6 +25,7 @@ from app.dispatch import router as dispatch_router
 from app.db import PgStore
 from app.followup import FollowupWorker
 from app.llm import OpenAiLlm
+from app.multiorg import CrmSinOrganizacion, RegistroDeOrganizaciones
 from app.profile import ProfileProvider
 from app.relay import RelayWorker
 from app.sender import SenderWorker
@@ -58,17 +59,31 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             await store.connect()
             await store.migrate(MIGRATIONS_DIR)
             logger.info("migraciones aplicadas — DB lista")
-            # Modo cloud: otra superficie del CRM y otra autenticación. Sin la
-            # bandera, exactamente el cliente de siempre.
-            crm = (
-                BrainsCrmClient(
+            # Tres modos, y solo el primero es nuevo:
+            #
+            # - multi-organización: no hay cliente fijo. Cada turno arma el
+            #   suyo con la credencial derivada de SU organización, y el
+            #   centinela hace que un camino que se olvide de armarlo
+            #   reviente en vez de escribirle al negocio equivocado.
+            # - cloud de un negocio: el cliente de una sola organización.
+            # - sin bandera: exactamente lo de toda la vida.
+            registro = None
+            if settings.multi_org:
+                registro = RegistroDeOrganizaciones(
+                    settings.crm_base_url,
+                    settings.crm_brain_secret,
+                    nombre_por_defecto=settings.agent_name,
+                    brief_path=settings.brief_path or None,
+                )
+                crm = CrmSinOrganizacion()
+            elif settings.cloud_mode:
+                crm = BrainsCrmClient(
                     settings.crm_base_url,
                     settings.crm_brain_secret,
                     settings.crm_organization,
                 )
-                if settings.cloud_mode
-                else CrmClient(settings.crm_base_url, settings.crm_bot_api_key)
-            )
+            else:
+                crm = CrmClient(settings.crm_base_url, settings.crm_bot_api_key)
             app.state.ctx = AppContext(
                 settings=settings,
                 store=store,
@@ -79,11 +94,19 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                     transcribe_model=settings.llm_transcribe_model,
                     base_url=settings.llm_base_url or None,
                 ),
-                profile=ProfileProvider(
-                    crm,
-                    default_name=settings.agent_name,
-                    brief_path=settings.brief_path or None,
+                # En multi-organización el perfil es de cada negocio y lo
+                # sirve el registro; un proveedor global aquí serviría el
+                # perfil de uno a todos.
+                profile=(
+                    None
+                    if settings.multi_org
+                    else ProfileProvider(
+                        crm,
+                        default_name=settings.agent_name,
+                        brief_path=settings.brief_path or None,
+                    )
                 ),
+                registro=registro,
             )
         c: AppContext = app.state.ctx
         _wire_coalescer(c)
@@ -124,7 +147,11 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             )
         logger.info(
             "Nea arriba (%s): %sfollowup + sender corriendo",
-            "cloud" if c.settings.cloud_mode else "meta",
+            (
+                "cloud multi-organización"
+                if c.settings.multi_org
+                else "cloud" if c.settings.cloud_mode else "meta"
+            ),
             "" if c.settings.cloud_mode else "relay + ",
         )
         try:
@@ -138,6 +165,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 await c.coalescer.aclose()
             if own_resources:
                 await c.crm.aclose()
+                if c.registro is not None:
+                    await c.registro.aclose()
                 await c.store.aclose()
 
     app = FastAPI(title="Nea — agente de agendamiento para WhatsApp", lifespan=lifespan)

@@ -78,10 +78,28 @@ instrucciones y conocimiento salen del contexto de la conversación, no del
 código ni del brief local. Cambiar el conocimiento en el CRM cambia lo que Nea
 responde, sin redesplegar nada.
 
-Pero **cada negocio corre su propia instancia**, con su secreto y su clave de
-LLM. No es una limitación: es lo que hace que el consumo de cada negocio lo
-pague su dueño y no quien hospeda. Una Nea compartida cargaría el gasto de
-todos a una sola cuenta.
+#### Una instancia por negocio, o una para todos
+
+Con `CRM_ORGANIZATION` puesta, esta Nea sirve a ESE negocio: su secreto y su
+clave de LLM son los de él.
+
+**Déjala vacía y sirve a todos los que el CRM le suscriba.** Entonces:
+
+- El secreto es del **despliegue**, no de una organización. Con él se verifica
+  todo despacho, y de él se **deriva** la credencial de cada negocio:
+  `HMAC-SHA256(secreto, "vocero:cerebro:v1:{organizationId}")` en base64url.
+  Nea la calcula; el CRM no se la manda.
+- **Cada negocio paga su propio consumo.** Su clave de OpenRouter y su modelo
+  llegan con el contexto de cada conversación, así que el gasto cae en la
+  cuenta de su dueño y no en la de quien hospeda. Sin esa clave Nea se calla y
+  deja la conversación a un humano, en vez de cobrarla a la cuenta equivocada.
+- **Las conversaciones no se cruzan.** La clave es (organización, identidad):
+  la misma persona puede escribirle a dos negocios sin que el historial de uno
+  aparezca en el prompt del otro.
+
+El despliegue lo registra el dueño de la plataforma desde el CRM
+(`pnpm cerebro:registrar`), y cada miembro lo elige en Ajustes → Cerebro: sin
+URL que pegar ni secreto que copiar, porque el secreto no es suyo.
 
 Sin la bandera no cambia nada: el webhook de Meta, el relay y `/api/bot/*`
 siguen siendo los de siempre. Las variables del modo cloud están en

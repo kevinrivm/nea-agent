@@ -24,11 +24,13 @@ import hashlib
 import hmac
 import json
 import logging
+from dataclasses import replace
 from typing import Any
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
+from app.multiorg import organizacion_del_despacho
 from app.state import AppContext, InboundMessage
 from app.turn import handle_flush
 
@@ -142,11 +144,95 @@ async def _procesar(ctx: AppContext, payload: dict[str, Any]) -> None:
             logger.info("dedup: despacho %s ya procesado — ignorado", dispatch_id)
             return
 
-    # El CRM ya sabe de quién es esta conversación; el cliente lo recuerda para
-    # no tener que preguntarlo por teléfono, que en esta superficie ni se puede.
-    registrar = getattr(ctx.crm, "registrar", None)
-    if callable(registrar):
-        registrar(identity, conversation_id)
+    if ctx.settings.multi_org:
+        ctx_turno = await _contexto_multiorg(ctx, payload, identity, conversation_id)
+        if ctx_turno is None:
+            return  # el motivo ya quedó en el log, y la conversación con humano
+    else:
+        # El CRM ya sabe de quién es esta conversación; el cliente lo recuerda
+        # para no preguntarlo por teléfono, que en esta superficie ni se puede.
+        registrar = getattr(ctx.crm, "registrar", None)
+        if callable(registrar):
+            registrar(identity, conversation_id)
+        ctx_turno = ctx
 
     # Directo al turno, sin coalescer: el CRM ya agrupó la ráfaga.
-    await handle_flush(ctx, identity, mensajes)
+    await handle_flush(ctx_turno, identity, mensajes)
+
+
+async def _contexto_multiorg(
+    ctx: AppContext,
+    payload: dict[str, Any],
+    identity: str,
+    conversation_id: str,
+) -> AppContext | None:
+    """El contexto de ESTE turno, con las credenciales de SU organización.
+
+    Una Nea multi-organización no puede tener un CRM ni un modelo fijos: el
+    cliente del CRM lleva la credencial de una organización concreta, y el
+    modelo se paga con la llave de ese miembro. Los dos se arman aquí y viven
+    lo que vive el turno.
+
+    Devuelve None cuando el turno NO debe correr. Los motivos se tratan igual
+    —silencio y la conversación en manos de un humano— porque desde el lado
+    del cliente son lo mismo: nadie le contestó, y alguien tiene que hacerlo.
+    """
+    registro = ctx.registro
+    if registro is None:
+        logger.error("modo multi-organización sin registro: no puedo contestar")
+        return None
+
+    org = organizacion_del_despacho(payload)
+    if org is None:
+        logger.warning("despacho sin organización en el cuerpo — ¿un CRM viejo?")
+        return None
+    org_id, slug = org
+
+    cliente = registro.cliente(org_id, slug)
+    cliente.registrar(identity, conversation_id)
+
+    # El contexto se trae AQUÍ y no dentro del turno porque de él salen las
+    # credenciales con las que el turno va a pensar. El turno lo reutiliza:
+    # `precargar` lo deja servido y `get_context` lo consume sin otra llamada.
+    contexto = await cliente.precargar(conversation_id)
+    if contexto is None:
+        logger.warning(
+            "%s: el CRM no dio contexto de %s — sin turno", slug, conversation_id
+        )
+        await _a_humano(cliente, conversation_id)
+        return None
+
+    credenciales = cliente.credenciales_llm()
+    if not credenciales or not credenciales.get("apiKey"):
+        # Sin llave del miembro NO se piensa. Caer a la del entorno sería
+        # cobrarle a la cuenta del dueño de la plataforma el consumo de todos
+        # sus miembros — exactamente lo que este modo existe para evitar.
+        logger.warning(
+            "%s: sin credenciales de IA para %s; token inactivo o "
+            "despliegue no confiable — sin turno",
+            slug,
+            conversation_id,
+        )
+        await _a_humano(cliente, conversation_id)
+        return None
+
+    return replace(
+        ctx,
+        crm=cliente,
+        llm=registro.llm(credenciales, ctx.settings),
+        profile=registro.perfil(org_id, slug),
+        organizacion=(org_id, slug),
+    )
+
+
+async def _a_humano(cliente: Any, conversation_id: str) -> None:
+    """Marca la conversación para un humano, sin que eso pueda tumbar nada.
+
+    Si hasta el handoff falla ya solo queda el log: el mensaje del cliente está
+    guardado en la bandeja del CRM desde antes de que Nea lo viera, así que no
+    se pierde nada aunque esta llamada no llegue.
+    """
+    try:
+        await cliente.post_handoff(conversation_id, "error")
+    except Exception:
+        logger.exception("no pude marcar %s para humano", conversation_id)
