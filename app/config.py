@@ -6,6 +6,7 @@ la validación de lo obligatorio ocurre al arranque real.
 """
 from __future__ import annotations
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -24,7 +25,12 @@ def canonical_identity(wa_id: str) -> str:
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env", env_file_encoding="utf-8", extra="ignore"
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        # Los campos se pueden dar por su nombre además de por su alias: es lo
+        # que deja construir Settings(llm_api_key=…) en las pruebas.
+        populate_by_name=True,
     )
 
     # Webhook de Meta
@@ -42,8 +48,20 @@ class Settings(BaseSettings):
     brief_path: str = ""  # markdown local, fallback si el CRM no tiene perfil
 
     # LLM
-    openai_api_key: str = ""
-    openai_model: str = "gpt-4o-mini"
+    # El proveedor del modelo no tiene por qué ser OpenAI, así que las
+    # variables no llevan su nombre: llamarlas OPENAI_* apuntando a OpenRouter
+    # es decir una cosa y hacer otra.
+    #
+    # Los nombres viejos SIGUEN funcionando. Renombrar a secas habría roto a
+    # toda instalación existente en su siguiente redespliegue, y una variable
+    # que deja de leerse no avisa: el bot arranca y se queda mudo.
+    llm_api_key: str = Field(
+        default="", validation_alias=AliasChoices("LLM_API_KEY", "OPENAI_API_KEY")
+    )
+    llm_model: str = Field(
+        default="gpt-4o-mini",
+        validation_alias=AliasChoices("LLM_MODEL", "OPENAI_MODEL"),
+    )
     # Proveedor del modelo. Vacío = OpenAI, como siempre.
     #
     # Cualquier API compatible con OpenAI vale: OpenRouter, un modelo propio,
@@ -54,14 +72,21 @@ class Settings(BaseSettings):
     # parte de lo compatible. Apuntando a otro proveedor, un audio del cliente
     # no se transcribe — Nea lo dice y pide que se lo escriban, en vez de
     # callarse. Si necesitas notas de voz, deja este campo vacío y usa OpenAI.
-    openai_base_url: str = ""
+    llm_base_url: str = Field(
+        default="", validation_alias=AliasChoices("LLM_BASE_URL", "OPENAI_BASE_URL")
+    )
     # Notas de voz → texto. Con OpenAI es whisper. Con un proveedor propio NO
     # hay endpoint de transcripción: hay que poner aquí un modelo que ACEPTE
     # AUDIO, y el audio viaja dentro del chat.
     #
     # No tiene por qué ser el mismo que conversa: hoy los GLM, por ejemplo, no
     # oyen. Uno conversa y otro escucha, con la misma clave.
-    openai_transcribe_model: str = "whisper-1"
+    llm_transcribe_model: str = Field(
+        default="whisper-1",
+        validation_alias=AliasChoices(
+            "LLM_TRANSCRIBE_MODEL", "OPENAI_TRANSCRIBE_MODEL"
+        ),
+    )
     history_window: int = 10
 
     # Guardarraíles y tiempos
@@ -114,7 +139,7 @@ class Settings(BaseSettings):
         que TODA nota de voz falle. Se detecta al arrancar y se avisa una vez,
         en vez de dejar que se descubra con un cliente esperando respuesta.
         """
-        return bool(self.openai_base_url) and self.openai_transcribe_model == "whisper-1"
+        return bool(self.llm_base_url) and self.llm_transcribe_model == "whisper-1"
 
     @property
     def cloud_mode(self) -> bool:

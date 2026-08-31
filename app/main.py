@@ -74,10 +74,10 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 store=store,
                 crm=crm,
                 llm=OpenAiLlm(
-                    settings.openai_api_key,
-                    settings.openai_model,
-                    transcribe_model=settings.openai_transcribe_model,
-                    base_url=settings.openai_base_url or None,
+                    settings.llm_api_key,
+                    settings.llm_model,
+                    transcribe_model=settings.llm_transcribe_model,
+                    base_url=settings.llm_base_url or None,
                 ),
                 profile=ProfileProvider(
                     crm,

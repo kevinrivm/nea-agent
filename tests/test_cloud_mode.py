@@ -334,11 +334,11 @@ class TestProveedor:
     def test_sin_base_url_es_OpenAI_como_siempre(self) -> None:
         # La garantía para quien ya corre Nea: no cambia de proveedor por que
         # esta variable exista.
-        assert Settings().openai_base_url == ""
+        assert Settings().llm_base_url == ""
 
     def test_se_puede_apuntar_a_openrouter(self) -> None:
-        s = Settings(openai_base_url="https://openrouter.ai/api/v1")
-        assert s.openai_base_url == "https://openrouter.ai/api/v1"
+        s = Settings(llm_base_url="https://openrouter.ai/api/v1")
+        assert s.llm_base_url == "https://openrouter.ai/api/v1"
 
     def test_el_cliente_apunta_al_proveedor_configurado(self) -> None:
         from app.llm import OpenAiLlm
@@ -388,13 +388,13 @@ class TestAudio:
     def test_whisper_con_otro_proveedor_se_detecta_al_arrancar(self) -> None:
         # `whisper-1` no existe fuera de OpenAI: esa combinación hace fallar
         # TODA nota de voz. Se avisa al arrancar, no con un cliente esperando.
-        s = Settings(openai_base_url="https://openrouter.ai/api/v1")
+        s = Settings(llm_base_url="https://openrouter.ai/api/v1")
         assert s.audio_mal_configurado is True
 
     def test_bien_configurado_no_avisa(self) -> None:
         s = Settings(
-            openai_base_url="https://openrouter.ai/api/v1",
-            openai_transcribe_model="google/gemini-2.5-flash",
+            llm_base_url="https://openrouter.ai/api/v1",
+            llm_transcribe_model="google/gemini-2.5-flash",
         )
         assert s.audio_mal_configurado is False
 
@@ -428,3 +428,43 @@ class TestAudio:
         partes = enviado["messages"][0]["content"]
         assert any(p["type"] == "input_audio" for p in partes)
         assert "SOLO" in partes[0]["text"]
+
+
+# ── Los nombres de las variables ──────────────────────────────────────────
+
+
+class TestNombresDeVariables:
+    """Se renombraron a LLM_* porque el proveedor no tiene por qué ser OpenAI.
+
+    Los viejos siguen funcionando, y eso se COMPRUEBA: una variable que deja de
+    leerse no avisa —el bot arranca y se queda mudo—, así que la compatibilidad
+    no puede depender de que alguien se acuerde.
+    """
+
+    def test_los_nombres_nuevos(self, monkeypatch) -> None:
+        monkeypatch.setenv("LLM_API_KEY", "nueva")
+        monkeypatch.setenv("LLM_BASE_URL", "https://openrouter.ai/api/v1")
+        monkeypatch.setenv("LLM_MODEL", "z-ai/glm-5.3-flash")
+        monkeypatch.setenv("LLM_TRANSCRIBE_MODEL", "google/gemini-2.5-flash")
+        s = Settings(_env_file=None)
+        assert s.llm_api_key == "nueva"
+        assert s.llm_model == "z-ai/glm-5.3-flash"
+        assert s.llm_transcribe_model == "google/gemini-2.5-flash"
+
+    def test_los_nombres_VIEJOS_siguen_funcionando(self, monkeypatch) -> None:
+        # La garantía para toda instalación que ya corre.
+        monkeypatch.setenv("OPENAI_API_KEY", "vieja")
+        monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+        monkeypatch.setenv("OPENAI_MODEL", "gpt-4o-mini")
+        monkeypatch.setenv("OPENAI_TRANSCRIBE_MODEL", "whisper-1")
+        s = Settings(_env_file=None)
+        assert s.llm_api_key == "vieja"
+        assert s.llm_base_url == "https://api.openai.com/v1"
+        assert s.llm_model == "gpt-4o-mini"
+
+    def test_el_nombre_nuevo_gana_al_viejo(self, monkeypatch) -> None:
+        # Si alguien migra a medias, manda el nuevo: es el que puso a
+        # propósito, no el que quedó de antes.
+        monkeypatch.setenv("OPENAI_API_KEY", "vieja")
+        monkeypatch.setenv("LLM_API_KEY", "nueva")
+        assert Settings(_env_file=None).llm_api_key == "nueva"
