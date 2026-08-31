@@ -1,0 +1,33 @@
+name: tests
+
+# Corre en cada PR y en cada push a main.
+#
+# Por qué existe: hasta ahora las pruebas dependían de que alguien se acordara
+# de correrlas. Y este repositorio no es de una persona — los miembros de la
+# comunidad despliegan de aquí, así que un error que llegue a `main` les llega
+# a ellos en su siguiente redespliegue.
+#
+# Python 3.11 porque es el del Dockerfile: probar en una versión distinta de la
+# que corre en producción es probar otra cosa.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Instalar dependencias
+        run: pip install -r requirements-dev.txt
+
+      - name: Pruebas
+        run: python -m pytest -q

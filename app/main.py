@@ -20,6 +20,8 @@ from fastapi.responses import JSONResponse
 from app.coalesce import Coalescer
 from app.config import Settings
 from app.crm import CrmClient
+from app.crm_brains import BrainsCrmClient
+from app.dispatch import router as dispatch_router
 from app.db import PgStore
 from app.followup import FollowupWorker
 from app.llm import OpenAiLlm
@@ -56,7 +58,17 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             await store.connect()
             await store.migrate(MIGRATIONS_DIR)
             logger.info("migraciones aplicadas — DB lista")
-            crm = CrmClient(settings.crm_base_url, settings.crm_bot_api_key)
+            # Modo cloud: otra superficie del CRM y otra autenticación. Sin la
+            # bandera, exactamente el cliente de siempre.
+            crm = (
+                BrainsCrmClient(
+                    settings.crm_base_url,
+                    settings.crm_brain_secret,
+                    settings.crm_organization,
+                )
+                if settings.cloud_mode
+                else CrmClient(settings.crm_base_url, settings.crm_bot_api_key)
+            )
             app.state.ctx = AppContext(
                 settings=settings,
                 store=store,
@@ -91,11 +103,21 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         followup_worker = FollowupWorker(c)
         sender_worker = SenderWorker(c)
         workers = [
-            asyncio.create_task(relay_worker.run(), name="relay-worker"),
             asyncio.create_task(followup_worker.run(), name="followup-worker"),
             asyncio.create_task(sender_worker.run(), name="sender-worker"),
         ]
-        logger.info("Nea arriba: relay + followup + sender corriendo")
+        # El relay reenvía al CRM el payload crudo de Meta. En cloud el CRM YA
+        # tiene el mensaje —él lo recibió y él nos lo despachó—, así que
+        # reenviárselo sería duplicarlo en la bandeja del cliente.
+        if not c.settings.cloud_mode:
+            workers.insert(
+                0, asyncio.create_task(relay_worker.run(), name="relay-worker")
+            )
+        logger.info(
+            "Nea arriba (%s): %sfollowup + sender corriendo",
+            "cloud" if c.settings.cloud_mode else "meta",
+            "" if c.settings.cloud_mode else "relay + ",
+        )
         try:
             yield
         finally:
@@ -114,6 +136,10 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     if ctx is not None:
         _wire_coalescer(ctx)
     app.include_router(webhook_router)
+    # La entrada del despacho solo existe en cloud. Montarla siempre dejaría
+    # una ruta pública de más en cada instalación que no la usa.
+    if (ctx.settings if ctx is not None else Settings()).cloud_mode:
+        app.include_router(dispatch_router)
 
     @app.get("/health")
     async def health(request: Request):  # type: ignore[no-untyped-def]
