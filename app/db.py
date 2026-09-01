@@ -46,6 +46,35 @@ def _conv_from_row(row: asyncpg.Record) -> Conversation:
     )
 
 
+def _pending_send_desde_fila(row: Any) -> PendingSend:
+    """Una fila de `pending_send` → su dataclass.
+
+    Existe como función, y no suelto dentro de la consulta, por el fallo que
+    arregla: el mapeo iba campo a campo y se quedó SIN LEER las columnas de
+    organización que 004 había añadido. La fila las guardaba bien; al releerla
+    volvían vacías, así que el SenderWorker no sabía de quién era el envío y no
+    entregaba ninguno. La cola de "jamás se descarta" estaba muerta.
+
+    Las pruebas no lo vieron porque `MemoryStore` devuelve el objeto que
+    guardó: ahí no hay mapeo que equivocar. El único sitio donde este error
+    existe es el que las pruebas no tocan.
+    """
+    return PendingSend(
+        id=row["id"],
+        conversation_id=row["conversation_id"],
+        crm_conversation_id=row["crm_conversation_id"],
+        content=row["content"],
+        attempts=row["attempts"],
+        created_at=row["created_at"],
+        next_retry_at=row["next_retry_at"],
+        delivered_at=row["delivered_at"],
+        abandoned_at=row["abandoned_at"],
+        organization_id=row["organization_id"],
+        organization_slug=row["organization_slug"],
+        dispatch_id=row["dispatch_id"],
+    )
+
+
 class PgStore:
     """Store respaldado por Postgres (asyncpg)."""
 
@@ -303,19 +332,21 @@ class PgStore:
         content: str,
         organization_id: str = "",
         organization_slug: str = "",
+        dispatch_id: str = "",
     ) -> int:
         row = await self.pool.fetchrow(
             """
             INSERT INTO pending_send
               (conversation_id, crm_conversation_id, content,
-               organization_id, organization_slug)
-            VALUES ($1, $2, $3, $4, $5) RETURNING id
+               organization_id, organization_slug, dispatch_id)
+            VALUES ($1, $2, $3, $4, $5, $6) RETURNING id
             """,
             conversation_id,
             crm_conversation_id,
             content,
             organization_id,
             organization_slug,
+            dispatch_id,
         )
         assert row is not None
         return row["id"]
@@ -330,20 +361,7 @@ class PgStore:
             """,
             now,
         )
-        return [
-            PendingSend(
-                id=r["id"],
-                conversation_id=r["conversation_id"],
-                crm_conversation_id=r["crm_conversation_id"],
-                content=r["content"],
-                attempts=r["attempts"],
-                created_at=r["created_at"],
-                next_retry_at=r["next_retry_at"],
-                delivered_at=r["delivered_at"],
-                abandoned_at=r["abandoned_at"],
-            )
-            for r in rows
-        ]
+        return [_pending_send_desde_fila(r) for r in rows]
 
     async def mark_pending_send_delivered(self, pending_id: int) -> None:
         await self.pool.execute(

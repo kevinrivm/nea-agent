@@ -156,6 +156,14 @@ async def _procesar(ctx: AppContext, payload: dict[str, Any]) -> None:
             registrar(identity, conversation_id)
         ctx_turno = ctx
 
+    # Y de qué despacho es. Sin esto el CRM rechaza la respuesta con 422: el
+    # `dispatchId` es lo que le deja no responder dos veces al mismo cliente
+    # cuando reintenta. Va aquí, para los dos modos, porque los dos contestan
+    # por la misma ruta.
+    registrar_despacho = getattr(ctx_turno.crm, "registrar_despacho", None)
+    if callable(registrar_despacho):
+        registrar_despacho(conversation_id, dispatch_id)
+
     # Directo al turno, sin coalescer: el CRM ya agrupó la ráfaga.
     await handle_flush(ctx_turno, identity, mensajes)
 

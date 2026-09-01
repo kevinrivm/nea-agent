@@ -17,6 +17,7 @@ import pytest
 import respx
 
 from app.config import Settings
+from app.crm import CrmConflict, CrmError
 from app.crm_brains import (
     BrainsCrmClient,
     _aplanar_reserva,
@@ -193,14 +194,84 @@ class TestCliente:
     async def test_habla_con_brains_y_autentica_con_el_secreto(
         self, cliente: BrainsCrmClient
     ) -> None:
+        # 201, que es lo que responde de verdad. Estaba puesto 200, y por eso
+        # esta prueba pasaba en verde mientras producción no entregaba nada.
         ruta = respx.post(f"{CRM_URL}/api/brains/messages").mock(
-            return_value=httpx.Response(200, json={"ok": True})
+            return_value=httpx.Response(201, json={"message": {"id": "msg_1"}})
         )
         await cliente.send_message(CONV, "hola")
 
         pedido = ruta.calls.last.request
         assert pedido.headers["authorization"] == f"Bearer {SECRETO}"
         assert pedido.headers["x-vocero-organization"] == "mi-negocio"
+
+    @respx.mock
+    async def test_responder_manda_el_despacho_que_contesta(
+        self, cliente: BrainsCrmClient
+    ) -> None:
+        """Sin `dispatchId` el CRM rechaza la respuesta entera (422).
+
+        Es lo que le deja ser idempotente: reintenta los despachos, y sin esto
+        el mismo texto le llegaría dos veces al cliente final.
+        """
+        ruta = respx.post(f"{CRM_URL}/api/brains/messages").mock(
+            return_value=httpx.Response(201, json={"message": {"id": "msg_1"}})
+        )
+        cliente.registrar_despacho(CONV, "dsp_abc")
+        await cliente.send_message(CONV, "hola")
+
+        cuerpo = json.loads(ruta.calls.last.request.content)
+        assert cuerpo["dispatchId"] == "dsp_abc"
+        assert cuerpo["conversationId"] == CONV
+        assert cuerpo["text"] == "hola"
+
+    @respx.mock
+    async def test_un_201_no_es_un_fallo(self, cliente: BrainsCrmClient) -> None:
+        """El contrato lo avisa: «no compares contra 200».
+
+        Comparar rompería el envío BUENO: el mensaje ya salió al cliente y el
+        turno lo trataría como fallido, lo reintentaría, y acabaría encolado.
+        """
+        respx.post(f"{CRM_URL}/api/brains/messages").mock(
+            return_value=httpx.Response(201, json={"message": {"id": "msg_1"}})
+        )
+        assert await cliente.send_message(CONV, "hola") == {"message": {"id": "msg_1"}}
+
+    @respx.mock
+    async def test_la_ventana_cerrada_calla_en_vez_de_reintentar(
+        self, cliente: BrainsCrmClient
+    ) -> None:
+        """En `/api/bot` era un 409 y aquí es un 422 (contrato §2.1).
+
+        Tiene que llegar al turno como conflicto, no como error: reintentar no
+        abre la ventana, y cada intento cuenta contra la calidad del número.
+        """
+        respx.post(f"{CRM_URL}/api/brains/messages").mock(
+            return_value=httpx.Response(
+                422, json={"error": {"code": "fuera_de_ventana", "message": "cerrada"}}
+            )
+        )
+        with pytest.raises(CrmConflict) as exc:
+            await cliente.send_message(CONV, "hola")
+        assert exc.value.code == "window_closed"
+
+    @respx.mock
+    async def test_un_422_de_verdad_sigue_siendo_un_fallo(
+        self, cliente: BrainsCrmClient
+    ) -> None:
+        """Un body inválido NO se traga como "ventana cerrada".
+
+        Es el fallo que tumbó el primer despliegue: si se confundieran, el
+        síntoma sería un silencio educado en vez de un error, y nadie iría a
+        mirar por qué el agente no contesta.
+        """
+        respx.post(f"{CRM_URL}/api/brains/messages").mock(
+            return_value=httpx.Response(
+                422, json={"error": {"code": "invalid_body", "message": "falta algo"}}
+            )
+        )
+        with pytest.raises(CrmError):
+            await cliente.send_message(CONV, "hola")
 
     @respx.mock
     async def test_el_contexto_va_por_conversacion_no_por_telefono(
