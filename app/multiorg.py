@@ -227,6 +227,38 @@ class CrmSinOrganizacion:
             f"despacho, no el arranque"
         )
 
+
+class LlmSinOrganizacion:
+    """El "cliente" del modelo mientras no se sabe de qué organización.
+
+    Hermano de `CrmSinOrganizacion`, y por el mismo motivo. En modo
+    multi-organización no hay un modelo por defecto: cada turno arma el suyo
+    apuntando al CRM con la credencial derivada de SU organización, y es el
+    CRM quien pone la llave del miembro al reenviar.
+
+    Antes aquí se construía un `OpenAiLlm` con `LLM_API_KEY` del entorno. Tenía
+    dos fallos, y el segundo es peor que el primero:
+
+    1. **No arranca.** En este modo esa variable no existe a propósito —Nea no
+       lleva la llave de nadie—, y el SDK de OpenAI se niega a construirse sin
+       credencial. El proceso moría en el `lifespan`.
+    2. **Si existiera, cobraría al que no era.** Un camino que se olvidara de
+       cambiar el cliente pensaría con la llave del dueño de la plataforma, y
+       el consumo de un miembro se lo pagaría otro. En silencio.
+
+    Por eso revienta en vez de degradar: `LlmExhausted` haría que el turno
+    siguiera su camino de «no pude pensar», y un olvido de cableado se leería
+    como un fallo del proveedor.
+    """
+
+    def __getattr__(self, nombre: str) -> Any:
+        raise RuntimeError(
+            f"se intentó usar el modelo ({nombre}) sin saber de qué "
+            f"organización es este turno: en modo multi-organización quien "
+            f"piensa es el CRM con la credencial del miembro, y ese cliente lo "
+            f"arma el despacho, no el arranque"
+        )
+
 def ctx_de_organizacion(
     ctx: "AppContext",
     organization_id: str,
