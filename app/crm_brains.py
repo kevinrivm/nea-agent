@@ -27,8 +27,10 @@ import httpx
 from app.crm import (
     AgendaUnavailable,
     CrmClient,
+    CrmConflict,
     CrmError,
     _booking_conflict,
+    _conflict_code,
 )
 
 logger = logging.getLogger("nea.crm.brains")
@@ -66,6 +68,9 @@ class BrainsCrmClient(CrmClient):
         # De qué conversación es cada identidad. Lo llena el despacho: el CRM
         # ya sabe de quién es el mensaje, así que Nea no tiene que averiguarlo.
         self._conversaciones: dict[str, str] = {}
+        # Y qué despacho se está contestando en cada conversación: el CRM lo
+        # exige al responder, para no mandar dos veces lo mismo si reintenta.
+        self._despachos: dict[str, str] = {}
         # El perfil viaja DENTRO del contexto en esta superficie. Se guarda al
         # pedirlo para que `get_profile()` no gaste una llamada de más por
         # turno — y para que el perfil sea el de la conversación que se está
@@ -84,6 +89,24 @@ class BrainsCrmClient(CrmClient):
     def registrar(self, identity: str, conversation_id: str) -> None:
         """Asocia una identidad con su conversación, desde el despacho."""
         self._conversaciones[identity] = conversation_id
+
+    def registrar_despacho(self, conversation_id: str, dispatch_id: str) -> None:
+        """Asocia una conversación con el despacho que se está contestando.
+
+        `POST /api/brains/messages` EXIGE el `dispatchId` (contrato §2.1): es
+        lo que le deja al CRM ser idempotente, porque reintenta los despachos
+        y sin él respondería dos veces al mismo cliente final.
+
+        Se guarda aquí y no se pasa por parámetro porque el turno no sabe de
+        despachos —ni tiene por qué—: recibe una conversación y un texto. Es la
+        misma razón por la que `registrar` existe.
+        """
+        if dispatch_id:
+            self._despachos[conversation_id] = dispatch_id
+
+    def despacho_de(self, conversation_id: str) -> str:
+        """El despacho en curso de esa conversación, o cadena vacía."""
+        return self._despachos.get(conversation_id, "")
 
     async def precargar(self, conversation_id: str) -> dict[str, Any] | None:
         """Trae el contexto AHORA y lo deja listo para el turno.
@@ -120,6 +143,45 @@ class BrainsCrmClient(CrmClient):
 
     def _request(self, method: str, url: str, **kwargs: Any):  # type: ignore[override]
         return super()._request(method, RUTAS.get(url, url), **kwargs)
+
+    async def send_message(
+        self, conversation_id: str, text: str, dispatch_id: str = ""
+    ) -> dict[str, Any]:
+        """Responder por el cerebro. Dos cosas que el de `/api/bot` no hacía.
+
+        **Manda el `dispatchId`.** El de siempre solo manda conversación y
+        texto, así que el CRM rechazaba TODA respuesta con `422 invalid_body`.
+        Nea pensaba bien, pagaba el modelo, y el texto no salía nunca.
+
+        **Acepta cualquier 2xx.** Esta ruta responde `201` al crear, y el
+        contrato lo avisa con todas las letras: «no compares contra 200 (esa
+        comparación ya rompió toda la reserva de citas en producción una vez)».
+        El cliente hacía exactamente eso: aun con el body correcto habría
+        tratado el envío bueno como un fallo, y lo habría reintentado hasta
+        encolarlo — con el mensaje YA entregado al cliente final.
+        """
+        dispatch_id = dispatch_id or self.despacho_de(conversation_id)
+        resp = await self._request(
+            "POST",
+            "/api/bot/messages",
+            json={
+                "dispatchId": dispatch_id,
+                "conversationId": conversation_id,
+                "text": text,
+            },
+        )
+        if resp.status_code == 409:
+            raise CrmConflict(_conflict_code(resp))
+        # Ventana de 24 h cerrada. En `/api/bot` era un 409 y aquí es un 422
+        # (contrato §2.1). Se traduce al mismo conflicto para que el turno
+        # calle igual que siempre en vez de reintentar algo que no va a
+        # cambiar: la ventana no se abre reintentando.
+        if resp.status_code == 422 and _conflict_code(resp) == "fuera_de_ventana":
+            raise CrmConflict("window_closed")
+        if not resp.is_success:
+            raise CrmError(f"messages devolvió {resp.status_code}")
+        data: dict[str, Any] = resp.json()
+        return data
 
     async def get_context(self, wa_identity: str) -> dict[str, Any] | None:
         """El contexto, pedido por conversación y no por identidad.

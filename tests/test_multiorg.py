@@ -16,11 +16,13 @@ import asyncio
 import base64
 import hashlib
 import hmac
+from dataclasses import fields
 
 import pytest
 
 from app import main
 from app.config import Settings
+from app.db import _conv_from_row
 from app.multiorg import (
     CrmSinOrganizacion,
     LlmSinOrganizacion,
@@ -29,7 +31,7 @@ from app.multiorg import (
     ctx_de_organizacion,
     organizacion_del_despacho,
 )
-from app.state import AppContext, MemoryStore
+from app.state import AppContext, Conversation, MemoryStore, utcnow
 
 SECRETO = "un-secreto-de-despliegue-largo-y-aburrido"
 ORG = "org_abc123"
@@ -372,3 +374,38 @@ async def test_el_modelo_del_arranque_revienta_al_usarse(arranque_multiorg):
     async with app.router.lifespan_context(app):
         with pytest.raises(RuntimeError, match="sin saber de qué organización"):
             await app.state.ctx.llm.complete([{"role": "user", "content": "hola"}])
+
+
+def test_el_mapeo_de_conversacion_no_se_deja_ninguna_columna():
+    """La hermana de la de `pending_send`, y esta duele más si falla.
+
+    Si el mapeo dejara de leer `organization_id`, toda conversación releída de
+    Postgres volvería «sin organización». El turno la trataría como la de una
+    instalación de un solo negocio y le hablaría al CRM con la credencial
+    equivocada: el historial de un negocio en el prompt de otro, que es
+    exactamente lo que 004 existe para impedir.
+
+    Contra `fields()` a propósito: el próximo campo que se añada no se puede
+    olvidar en el mapeo sin que esto se ponga rojo.
+    """
+    ahora = utcnow()
+    fila = {
+        "id": 1,
+        "wa_identity": "5215512345678",
+        "crm_conversation_id": "cv_abc",
+        "organization_id": "org_a",
+        "organization_slug": "negocio-a",
+        "phase": "descubrimiento",
+        "greeted": True,
+        "media_notice_sent": False,
+        "followup_due_at": None,
+        "followup_sent": False,
+        "last_inbound_at": ahora,
+        "stalled_at": None,
+    }
+    conv = _conv_from_row(fila)
+
+    for campo in fields(Conversation):
+        assert getattr(conv, campo.name) == fila[campo.name], (
+            f"el mapeo no lee {campo.name}"
+        )

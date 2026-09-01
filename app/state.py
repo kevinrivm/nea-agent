@@ -97,6 +97,9 @@ class PendingSend:
     # con valor por defecto no puede preceder a uno sin él.
     organization_id: str = ""
     organization_slug: str = ""
+    # Y qué despacho estaba contestando: el CRM lo exige al responder por el
+    # cerebro, y cuando el worker despierta el turno ya no existe para dárselo.
+    dispatch_id: str = ""
 
 
 @dataclass
@@ -179,6 +182,7 @@ class Store(Protocol):
         content: str,
         organization_id: str = "",
         organization_slug: str = "",
+        dispatch_id: str = "",
     ) -> int: ...
     async def due_pending_sends(self, now: datetime) -> list[PendingSend]: ...
     async def mark_pending_send_delivered(self, pending_id: int) -> None: ...
@@ -328,6 +332,7 @@ class MemoryStore:
         content: str,
         organization_id: str = "",
         organization_slug: str = "",
+        dispatch_id: str = "",
     ) -> int:
         pid = next(self._ids)
         now = utcnow()
@@ -337,6 +342,7 @@ class MemoryStore:
             attempts=0, created_at=now, next_retry_at=now,
             organization_id=organization_id,
             organization_slug=organization_slug,
+            dispatch_id=dispatch_id,
         )
         return pid
 

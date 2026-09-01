@@ -402,8 +402,13 @@ async def _send(ctx: AppContext, conv_id: int, crm_conv_id: str, text: str) -> b
     # —quizá horas después— tiene que hablarle al CRM con la credencial de
     # ESTA, y para entonces el turno ya no existe.
     org_id, org_slug = ctx.organizacion or ("", "")
+    # Y el despacho que se estaba contestando: el CRM lo exige para responder,
+    # y para cuando el worker despierte este turno ya no existe. El turno no lo
+    # sabe —recibe conversación y texto—, se lo pide al cliente, que sí.
+    despacho_de = getattr(ctx.crm, "despacho_de", None)
+    dispatch_id = despacho_de(crm_conv_id) if callable(despacho_de) else ""
     pending_id = await ctx.store.enqueue_pending_send(
-        conv_id, crm_conv_id, text, org_id, org_slug
+        conv_id, crm_conv_id, text, org_id, org_slug, dispatch_id
     )
     logger.error(
         "envío agotó reintentos del turno — encolado como pending_send %d",

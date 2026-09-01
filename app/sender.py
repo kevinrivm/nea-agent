@@ -67,6 +67,13 @@ class SenderWorker:
     async def _attempt(
         self, ctx: AppContext, item: PendingSend, now: datetime
     ) -> None:
+        # Qué despacho estaba contestando. El CRM lo exige para responder por
+        # el cerebro, y aquí el turno que lo sabía ya no existe: sale de la
+        # fila. Sin esto el reintento diferido se rechazaba con 422 hasta
+        # agotar las 24 h — la cola entera existía para nada.
+        registrar_despacho = getattr(ctx.crm, "registrar_despacho", None)
+        if callable(registrar_despacho):
+            registrar_despacho(item.crm_conversation_id, item.dispatch_id)
         try:
             await ctx.crm.send_message(item.crm_conversation_id, item.content)
         except CrmConflict as exc:
