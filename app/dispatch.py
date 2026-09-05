@@ -207,7 +207,7 @@ async def _contexto_multiorg(
         logger.warning(
             "%s: el CRM no dio contexto de %s — sin turno", slug, conversation_id
         )
-        await _a_humano(cliente, conversation_id)
+        await _a_humano(cliente, conversation_id, "error")
         return None
 
     config_ia = cliente.credenciales_llm()
@@ -223,7 +223,7 @@ async def _contexto_multiorg(
             slug,
             conversation_id,
         )
-        await _a_humano(cliente, conversation_id)
+        await _a_humano(cliente, conversation_id, "sin_credencial")
         return None
 
     return replace(
@@ -235,14 +235,20 @@ async def _contexto_multiorg(
     )
 
 
-async def _a_humano(cliente: Any, conversation_id: str) -> None:
+async def _a_humano(cliente: Any, conversation_id: str, motivo: str) -> None:
     """Marca la conversación para un humano, sin que eso pueda tumbar nada.
 
     Si hasta el handoff falla ya solo queda el log: el mensaje del cliente está
     guardado en la bandeja del CRM desde antes de que Nea lo viera, así que no
     se pierde nada aunque esta llamada no llegue.
+
+    El `motivo` es obligatorio y no tiene valor por defecto a propósito. Lo
+    tuvo —"error"— y por eso el miembro sin token leía «Error del proveedor de
+    IA» en su bandeja: un mensaje que manda a revisar OpenRouter cuando al
+    proveedor no se le había llamado siquiera. Quien escala sabe por qué; el
+    default lo único que hacía era dejarle no decirlo.
     """
     try:
-        await cliente.post_handoff(conversation_id, "error")
+        await cliente.post_handoff(conversation_id, motivo)
     except Exception:
         logger.exception("no pude marcar %s para humano", conversation_id)
