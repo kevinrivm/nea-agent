@@ -83,6 +83,8 @@ class OpenAiLlm:
         transcribe_model: str = "whisper-1",
         base_url: str | None = None,
         default_headers: dict[str, str] | None = None,
+        reasoning_effort: str = "",
+        provider_sort: str = "",
     ) -> None:
         # base_url ≠ None → proveedor OpenAI-compatible (p. ej. OpenRouter,
         # para el bench de modelos del 002). Ojo: la transcripción de audio
@@ -96,6 +98,11 @@ class OpenAiLlm:
         )
         self._model = model
         self._transcribe_model = transcribe_model
+        # Los dos ajustes de velocidad. Se deciden una vez, aqui, y viajan en
+        # cada llamada; `_extras_ok` los apaga solos si el proveedor se queja.
+        self._reasoning_effort = reasoning_effort.strip()
+        self._provider_sort = provider_sort.strip()
+        self._extras_ok = True
         # Con proveedor propio (OpenRouter y compañía) no hay endpoint de
         # transcripción: el audio se manda DENTRO del chat, a un modelo que
         # sepa oír. Se decide aquí y no en cada llamada para que el camino sea
@@ -203,6 +210,48 @@ class OpenAiLlm:
                 await asyncio.sleep(1.0)
         raise LlmExhausted(str(last_error))
 
+    def _extras(self) -> dict[str, Any]:
+        """Los ajustes que no son del contrato de OpenAI.
+
+        Van por `extra_body` a proposito: OpenRouter los entiende y un
+        proveedor que no, los ignora en vez de fallar.
+
+        OJO con `reasoning: {"exclude": true}`: parece lo mismo que "minimal"
+        y no lo es. Oculta el razonamiento de la respuesta pero el modelo lo
+        SIGUE generando - medido en huaraches el 8-sep: 650 tokens y 19.7 s de
+        mediana contra 67 y 7.7 s con "minimal". Que nadie lo "mejore".
+        """
+        if not self._extras_ok:
+            return {}
+        extra: dict[str, Any] = {}
+        if self._reasoning_effort:
+            extra["reasoning"] = {"effort": self._reasoning_effort}
+        if self._provider_sort:
+            extra["provider"] = {"sort": self._provider_sort}
+        return extra
+
+    def _quiza_por_los_extras(self, exc: Exception) -> None:
+        """Si el proveedor se quejo de `reasoning` o `provider`, se apagan.
+
+        Aqui pasan modelos de muchos miembros, no uno solo elegido por
+        nosotros. Bajar el tiempo de respuesta es una optimizacion, y una
+        optimizacion no puede costar la respuesta: al primer reproche este
+        cliente deja de mandarlos y el reintento sale limpio.
+
+        Es pegajoso a proposito -el soporte del modelo no cambia a media vida
+        del proceso- y por organizacion, porque cada una tiene el suyo.
+        """
+        if not self._extras_ok:
+            return
+        texto = str(exc).lower()
+        if "reasoning" in texto or "provider" in texto:
+            self._extras_ok = False
+            logger.warning(
+                "llm: %s no acepta los ajustes de velocidad - se apagan para "
+                "este modelo y se reintenta sin ellos",
+                self._model,
+            )
+
     async def complete(
         self,
         messages: list[dict[str, Any]],
@@ -215,6 +264,9 @@ class OpenAiLlm:
                 if tools:
                     kwargs["tools"] = tools
                     kwargs["tool_choice"] = "auto"
+                extra = self._extras()
+                if extra:
+                    kwargs["extra_body"] = extra
                 resp = await self._client.chat.completions.create(
                     model=self._model, messages=messages, **kwargs
                 )
@@ -232,6 +284,7 @@ class OpenAiLlm:
                 logger.warning("llm: respuesta vacía, intento %d", attempt + 1)
             except Exception as exc:  # red, API, parseo — todo reintenta
                 last_error = exc
+                self._quiza_por_los_extras(exc)
                 logger.warning("llm: fallo en intento %d: %s", attempt + 1, exc)
             if attempt < self.RETRIES:
                 await asyncio.sleep(2**attempt)  # 1 s, 2 s
