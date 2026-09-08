@@ -87,6 +87,40 @@ class Settings(BaseSettings):
             "LLM_TRANSCRIBE_MODEL", "OPENAI_TRANSCRIBE_MODEL"
         ),
     )
+
+    # Esfuerzo de razonamiento del modelo. "minimal" lo baja al mínimo.
+    #
+    # El razonamiento se cobra en segundos que el cliente pasa mirando
+    # "escribiendo…". Medido en huaraches-nea el 7-sep contra GLM 5.3 Flash:
+    # con razonamiento, 150 tokens PENSANDO por cada 146 caracteres de
+    # respuesta y 4.4 s; con "minimal", 2.0 s y cero. El mismo modelo y la
+    # misma respuesta.
+    #
+    # Vacía = no se manda el parámetro y decide el proveedor. Un modelo que no
+    # entienda `reasoning` lo ignora: va por `extra_body`, fuera del contrato
+    # de OpenAI. Y si alguno se quejara, la llamada se reintenta sin él (ver
+    # `llm.py`) — bajar el tiempo no puede costar una respuesta.
+    llm_reasoning_effort: str = Field(
+        default="minimal", validation_alias=AliasChoices("LLM_REASONING_EFFORT")
+    )
+
+    # A qué proveedor de OpenRouter ir. "throughput" = al más rápido.
+    #
+    # La misma llamada tardaba 5.4 s o 19.6 s según a quién la ruteara: la
+    # varianza entre proveedores era MAYOR que cualquier optimización del
+    # prompt. Vacía = decide OpenRouter, que ordena por precio.
+    llm_provider_sort: str = Field(
+        default="throughput", validation_alias=AliasChoices("LLM_PROVIDER_SORT")
+    )
+
+    # NO hay tope de tokens de salida, y es una decisión, no un olvido.
+    #
+    # En huaraches se puso uno el 8-sep con un banco que prometía partir a la
+    # mitad el peor caso. En producción hizo lo contrario: el modelo gastaba
+    # los tokens razonando, chocaba con la pared y había que repetir la
+    # llamada entera. Un turno de 53 s. El tope convertía UNA llamada lenta en
+    # DOS. Se quitó el mismo día.
+
     history_window: int = 10
 
     # Guardarraíles y tiempos
