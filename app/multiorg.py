@@ -176,6 +176,11 @@ class RegistroDeOrganizaciones:
                 transcribe_model=transcribe,
                 base_url=base_url,
                 default_headers={"X-Vocero-Organization": slug},
+                # Los ajustes de velocidad son de esta Nea, no del miembro:
+                # el CRM reenvia el cuerpo TAL CUAL, asi que `extra_body`
+                # llega al proveedor igual que en mono-organizacion.
+                reasoning_effort=por_defecto.llm_reasoning_effort,
+                provider_sort=por_defecto.llm_provider_sort,
             )
             self._llms[clave] = cliente
         return cliente

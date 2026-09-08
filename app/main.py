@@ -105,6 +105,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                         settings.llm_model,
                         transcribe_model=settings.llm_transcribe_model,
                         base_url=settings.llm_base_url or None,
+                        reasoning_effort=settings.llm_reasoning_effort,
+                        provider_sort=settings.llm_provider_sort,
                     )
                 ),
                 # En multi-organización el perfil es de cada negocio y lo
