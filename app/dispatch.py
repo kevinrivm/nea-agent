@@ -164,6 +164,10 @@ async def _procesar(ctx: AppContext, payload: dict[str, Any]) -> None:
     if callable(registrar_despacho):
         registrar_despacho(conversation_id, dispatch_id)
 
+    registrar_envelope = getattr(ctx_turno.crm, "registrar_envelope", None)
+    if callable(registrar_envelope):
+        registrar_envelope(conversation_id, payload)
+
     # Directo al turno, sin coalescer: el CRM ya agrupó la ráfaga.
     await handle_flush(ctx_turno, identity, mensajes)
 

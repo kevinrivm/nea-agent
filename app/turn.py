@@ -344,7 +344,7 @@ async def _tool_loop(
     """Rondas de tool-calling hasta obtener texto final (o rendirse)."""
     for _ in range(MAX_TOOL_ROUNDS):
         reply = await ctx.llm.complete(
-            messages, tools=tool_schemas(ctx.agenda_enabled)
+            messages, tools=tool_schemas(ctx.agenda_enabled, bool(getattr(ctx.crm, "supports_agenda_v2", False)))
         )
         if not reply.tool_calls:
             return reply.content  # turno de puro texto
