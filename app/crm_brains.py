@@ -19,6 +19,7 @@ cambia por que este archivo exista.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 from typing import Any
 
@@ -71,6 +72,8 @@ class BrainsCrmClient(CrmClient):
         # Y qué despacho se está contestando en cada conversación: el CRM lo
         # exige al responder, para no mandar dos veces lo mismo si reintenta.
         self._despachos: dict[str, str] = {}
+        self._envelopes: dict[str, dict[str, Any]] = {}
+        self.supports_agenda_v2 = False
         # El perfil viaja DENTRO del contexto en esta superficie. Se guarda al
         # pedirlo para que `get_profile()` no gaste una llamada de más por
         # turno — y para que el perfil sea el de la conversación que se está
@@ -103,6 +106,32 @@ class BrainsCrmClient(CrmClient):
         """
         if dispatch_id:
             self._despachos[conversation_id] = dispatch_id
+
+    def registrar_envelope(self, conversation_id: str, payload: dict[str, Any]) -> None:
+        self.supports_agenda_v2 = "agenda_v2" in payload.get("capabilities", [])
+        if self.supports_agenda_v2:
+            self._envelopes[conversation_id] = {"dispatchId": payload.get("dispatchId"), "brainGeneration": payload.get("brainGeneration")}
+
+    async def list_bookings(self, conversation_id: str) -> list[dict[str, Any]]:
+        response = await self._request("GET", "/api/brains/agenda/bookings", params={"conversationId": conversation_id})
+        if not response.is_success:
+            raise CrmError("No se pudieron consultar las citas")
+        return list(response.json().get("bookings") or [])
+
+    async def cancel_booking(self, conversation_id: str, selection_token: str, confirmation: bool) -> dict[str, Any]:
+        body = self._operation(conversation_id, "cancel", selection_token)
+        body.update(selectionToken=selection_token, confirmation=confirmation)
+        response = await self._request("POST", "/api/brains/agenda/cancel", json=body)
+        if response.status_code == 409:
+            raise _booking_conflict(response)
+        if not response.is_success:
+            raise CrmError("No se pudo cancelar la cita")
+        return response.json()
+
+    def _operation(self, conversation_id: str, action: str, value: str) -> dict[str, Any]:
+        envelope = self._envelopes.get(conversation_id, {})
+        key = hashlib.sha256(f"{conversation_id}:{self.despacho_de(conversation_id)}:{action}:{value}".encode()).hexdigest()
+        return {"conversationId": conversation_id, "idempotencyKey": key, **envelope}
 
     def despacho_de(self, conversation_id: str) -> str:
         """El despacho en curso de esa conversación, o cadena vacía."""
@@ -266,7 +295,7 @@ class BrainsCrmClient(CrmClient):
         if resp.status_code == 404:
             raise AgendaUnavailable("este CRM no tiene el motor de agenda encendido")
         if resp.status_code != 200:
-            raise CrmError(f"availability devolvió {resp.status_code}")
+            raise CrmError("availability_unknown: no afirmar que el calendario está libre; reintentar o derivar")
         slots = resp.json().get("slots") or []
         return list(slots)[:limit]
 
@@ -276,17 +305,22 @@ class BrainsCrmClient(CrmClient):
         return await self._agendar("POST", conversation_id, start_utc, "bookings")
 
     async def reschedule_booking(
-        self, conversation_id: str, start_utc: str
+        self, conversation_id: str, start_utc: str, selection_token: str | None = None
     ) -> dict[str, Any]:
-        return await self._agendar("PATCH", conversation_id, start_utc, "reschedule")
+        return await self._agendar("PATCH", conversation_id, start_utc, "reschedule", selection_token)
 
     async def _agendar(
-        self, method: str, conversation_id: str, start_utc: str, que: str
+        self, method: str, conversation_id: str, start_utc: str, que: str, selection_token: str | None = None
     ) -> dict[str, Any]:
+        body: dict[str, Any] = {"conversationId": conversation_id, "startUtc": start_utc}
+        if self.supports_agenda_v2:
+            body.update(self._operation(conversation_id, method, start_utc + (selection_token or "")))
+            if method == "PATCH":
+                body.update(selectionToken=selection_token, confirmation=True)
         resp = await self._request(
             method,
             "/api/bot/bookings",
-            json={"conversationId": conversation_id, "startUtc": start_utc},
+            json=body,
         )
         if resp.status_code == 409:
             raise _booking_conflict(resp)
