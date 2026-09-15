@@ -151,20 +151,27 @@ DIAS_CALENDARIO = 14
 
 
 def calendario(now: datetime, tz: ZoneInfo, dias: int = DIAS_CALENDARIO) -> str:
-    """"hoy jueves 10 = 2026-09-10; viernes 11 = 2026-09-11; …" en la zona dada.
+    """Los próximos días con su AAAA-MM-DD, agrupados por semana (lunes a domingo).
 
     El modelo no hace aritmética de calendario confiable: en la autoprueba
     con los casos de Tobaxis, "la próxima semana, jueves o viernes" dicho un
-    jueves 10 se convirtió en el martes 15 y el miércoles 16. Con la tabla
-    delante solo tiene que buscar el renglón.
+    jueves 10 se consultó como martes 15 y miércoles 16, y con una lista
+    corrida, como lunes 14. Con la semana nombrada solo tiene que buscar el
+    renglón: "la próxima semana" → "PRÓXIMA SEMANA: … jueves 17 = 2026-09-17".
     """
     local = now.astimezone(tz)
-    partes = []
+    nombres = ("ESTA SEMANA", "PRÓXIMA SEMANA", "EN DOS SEMANAS", "EN TRES SEMANAS")
+    semanas: dict[int, list[str]] = {}
     for i in range(dias):
         dia = local + timedelta(days=i)
+        semana = (dia.date() - (local.date() - timedelta(days=local.weekday()))).days // 7
         pref = "hoy " if i == 0 else "mañana " if i == 1 else ""
-        partes.append(f"{pref}{DIAS[dia.weekday()]} {dia.day} = {dia:%Y-%m-%d}")
-    return "; ".join(partes)
+        semanas.setdefault(semana, []).append(
+            f"{pref}{DIAS[dia.weekday()]} {dia.day} = {dia:%Y-%m-%d}"
+        )
+    return " | ".join(
+        f"{nombres[min(n, len(nombres) - 1)]}: {', '.join(d)}" for n, d in semanas.items()
+    )
 
 
 def _fmt_local(dt: datetime, tz: ZoneInfo) -> str:

@@ -206,7 +206,7 @@ def test_el_prompt_trae_calendario_con_fechas_iso():
         conv=Conversation(id=1, wa_identity="x", greeted=True), now=ahora,
     )
     assert "hoy jueves 10 = 2026-09-10" in prompt
-    assert "jueves 17 = 2026-09-17" in prompt
+    assert "PRÓXIMA SEMANA: lunes 14 = 2026-09-14" in prompt and "jueves 17 = 2026-09-17" in prompt
     assert "viernes 18 = 2026-09-18" in prompt
 
 
