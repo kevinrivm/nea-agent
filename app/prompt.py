@@ -251,8 +251,10 @@ def _booking_lines(booking: object, now: datetime) -> list[str]:
 
     if not isinstance(nxt, dict) and not isinstance(pasada, dict):
         lines.append(
-            "- El lead NO tiene ninguna cita por delante. Si pregunta por una que "
-            "no aparece aquí, dile que no la ves en la agenda y ofrécele agendar. "
+            "- El lead NO tiene ninguna cita por delante. Esto manda sobre el "
+            "historial: aunque ahí aparezca una cita confirmada o su enlace, YA NO "
+            "está vigente. Si pregunta si sigue en pie, la respuesta es NO: dile que "
+            "no la ves en la agenda y ofrécele agendar otra. NUNCA la confirmes y "
             "NUNCA inventes el motivo: nada de \"no quedó guardada\", \"hubo una "
             "falla\" ni \"por alguna razón\"."
         )
