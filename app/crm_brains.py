@@ -32,6 +32,7 @@ from app.crm import (
     CrmError,
     _booking_conflict,
     _conflict_code,
+    _payload,
 )
 
 logger = logging.getLogger("nea.crm.brains")
@@ -325,6 +326,12 @@ class BrainsCrmClient(CrmClient):
         if resp.status_code == 409:
             raise _booking_conflict(resp)
         if resp.status_code == 404:
+            # Mismo 404 ambiguo que en `/api/bot`: con cuerpo es "no hay cita
+            # que mover"; vacío, "aquí no hay agenda". Leerlos igual apagaba
+            # el agendamiento de toda la instancia la primera vez que alguien
+            # quería mover una cita que ya había pasado.
+            if method == "PATCH" and _payload(resp):
+                raise CrmConflict("no_booking", _payload(resp))
             raise AgendaUnavailable("este CRM no tiene el motor de agenda encendido")
         if resp.status_code not in (200, 201):
             raise CrmError(f"{que} devolvió {resp.status_code}")
