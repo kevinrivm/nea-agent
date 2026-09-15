@@ -300,6 +300,32 @@ class BrainsCrmClient(CrmClient):
         slots = resp.json().get("slots") or []
         return list(slots)[:limit]
 
+    async def consultar_huecos(
+        self,
+        conversation_id: str,
+        date: str | None = None,
+        limit: int = 12,
+        per_day: int | None = None,
+        days: int | None = None,
+    ) -> dict[str, Any]:
+        """Huecos + `query` (hasta dónde llega lo consultado), sin recortar.
+
+        Sin recorte a propósito: con `date` el CRM registra como oferta TODAS
+        las horas de ese día, y si Nea se quedara con menos, rechazaría por su
+        cuenta una hora que el CRM sí ofreció. `limit`, `per_day` y `days` no
+        viajan, igual que en `get_availability`: el reparto lo decide el CRM.
+        """
+        params: dict[str, Any] = {"conversationId": conversation_id}
+        if date:
+            params["date"] = date
+        resp = await self._request("GET", "/api/bot/availability", params=params)
+        if resp.status_code == 404:
+            raise AgendaUnavailable("este CRM no tiene el motor de agenda encendido")
+        if resp.status_code != 200:
+            raise CrmError("availability_unknown: no afirmar que el calendario está libre; reintentar o derivar")
+        data = resp.json()
+        return {"slots": list(data.get("slots") or []), "query": data.get("query")}
+
     async def create_booking(
         self, conversation_id: str, start_utc: str
     ) -> dict[str, Any]:
