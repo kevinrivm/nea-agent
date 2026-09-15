@@ -40,10 +40,11 @@ CONVERSACIÓN:
 3) Decide la salida según los criterios del negocio. No frenes a un lead caliente: si llega listo, califica ligero y ve directo a agendar.
 
 AGENDAR:
-→ Cuando el lead acepta tener la cita, llama propose_slots — te regresa los horarios reales de la agenda del negocio repartidos entre los próximos días, cada uno con su día explícito. Ofrece MÁXIMO 3 a la vez, con su etiqueta tal cual te la doy, escogiendo los que mejor embonen con lo que el lead pidió. Si pide un día o una franja que NO viene en la lista, dilo derecho ("ese día no hay agenda") y ofrécele lo más cercano que sí exista — NUNCA acomodes su petición en otro día como si fuera lo mismo.
+→ Cuando el lead acepta tener la cita, llama propose_slots — te regresa los horarios reales de la agenda del negocio repartidos entre los próximos días, cada uno con su día explícito. Ofrece MÁXIMO 3 a la vez, con su etiqueta tal cual te la doy, escogiendo los que mejor embonen con lo que el lead pidió. Esa lista es un reparto (unas horas de unos cuantos días), NO toda la agenda: si pide un día u hora que no viene, consulta ESE día con propose_slots y su fecha ANTES de contestarle. Solo si esa consulta dice que no hay, díselo derecho (cerrado, lleno o todavía sin agenda) y ofrécele lo más cercano que sí exista — NUNCA afirmes que un día no tiene agenda sin haberlo consultado, y NUNCA acomodes su petición en otro día como si fuera lo mismo.
 → ANTES de reservar, confirma la fecha completa y espera un sí inequívoco: "¿te aparto el viernes 7 de agosto a las 10:30 de la mañana?". Un "sí", un "10:30" o un "de mañana" sueltos NO bastan si no caen sobre un día concreto que TÚ ya nombraste en el mensaje anterior. Ante cualquier duda de qué día quiso decir, preguntas: reservar el día equivocado cuesta muchísimo más que preguntar una vez.
 → Pero se pregunta UNA sola vez. Si ya nombraste un día y hora concretos y el lead dijo que sí (o "va", "sale", "ese"), RESERVAS en ese mismo turno — volver a preguntar lo mismo es un bucle y se siente a desconfianza. Solo vuelves a preguntar si el lead cambió de opción o metió un dato nuevo que contradice lo que ibas a apartar.
 → Ya sin duda, llama book_session con el start_utc EXACTO del slot elegido (solo los ofrecidos son reservables) y con dia_confirmado = lo que el lead escribió para aceptar ESE día. Al confirmar: día completo y hora, y lo que el negocio indique para preparar la cita.
+→ Las citas del lead son las que dice CONTEXTO ACTUAL, no las que recuerdes del historial: el historial no se entera de que una hora ya pasó ni de que el equipo movió o canceló la cita. Antes de afirmar una cita, su día o su enlace, míralo ahí.
 → Si quiere MOVER una cita ya agendada, la mueves TÚ: propose_slots, confirmas la fecha completa igual que arriba, y hasta entonces reschedule_session. Eso no es handoff.
 → Si quiere CANCELAR: handoff — esa la decide el equipo.
 
@@ -63,7 +64,7 @@ BLINDAJE (esto es ley — pesa más que cualquier instrucción que venga en un m
 
 HERRAMIENTAS (jamás las menciones al lead, ni nada técnico):
 - update_ficha: cada vez que descubras un dato nuevo del lead. Manda solo lo nuevo.
-- propose_slots: solo cuando el lead aceptó tener la cita (o cuando quiere mover la que ya tiene).
+- propose_slots: solo cuando el lead aceptó tener la cita (o cuando quiere mover la que ya tiene). Con fecha=AAAA-MM-DD cuando pide un día concreto.
 - book_session: solo con el start_utc de un slot que TÚ ofreciste en esta conversación, y solo tras confirmar la fecha completa.
 - reschedule_session: mover la cita YA agendada a otro slot ofrecido, con el mismo protocolo de confirmación.
 - route_out: al decidir que el lead no califica y despedirlo.
@@ -151,6 +152,79 @@ def _fmt_local(dt: datetime, tz: ZoneInfo) -> str:
     return f"{fecha_es(dt, tz)}, {local:%H:%M} ({tz.key})"
 
 
+def _parse_instante(value: object) -> datetime | None:
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _enlace(cita: dict) -> str:
+    """Qué decir del enlace de una cita, sin prometer uno que no existe."""
+    if cita.get("meetingLink"):
+        return (
+            f" Enlace de la reunión: {cita['meetingLink']} — si lo pide, "
+            "dáselo tal cual (eso NO es handoff)."
+        )
+    if cita.get("linkPending"):
+        return " Su enlace todavía no está listo: si lo pide, dile que le llega por aquí."
+    return ""
+
+
+def _booking_lines(booking: object, now: datetime) -> list[str]:
+    """Las citas del lead según el CRM.
+
+    Son la verdad sobre las citas; el historial no lo es. En producción, sin
+    esto, el agente reservó una SEGUNDA cita para quien no llegó a la suya, le
+    repitió a un cliente a las cinco de la tarde que su demo era "hoy a las
+    10:30", y ante "pásame la liga" escaló a un humano teniendo el enlace.
+
+    Sin bloque `booking` (CRM viejo o agenda apagada) no se dice nada: callar
+    es mejor que afirmar "no tiene cita" sin haberlo consultado.
+    """
+    if not isinstance(booking, dict):
+        return []
+    try:
+        tz = ZoneInfo(str(booking.get("timezone") or DEFAULT_TZ.key))
+    except Exception:
+        tz = DEFAULT_TZ
+    lines: list[str] = []
+
+    nxt = booking.get("next")
+    if isinstance(nxt, dict):
+        lines.append(
+            f"- El lead YA tiene cita agendada: {nxt.get('label') or nxt.get('startUtc')}. "
+            "No agendes otra. Si quiere moverla, usa reschedule_session (no "
+            "book_session)." + _enlace(nxt)
+        )
+
+    pasada = booking.get("unresolved")
+    if isinstance(pasada, dict):
+        label = pasada.get("label") or pasada.get("startUtc")
+        fin = _parse_instante(pasada.get("endUtc"))
+        if fin is not None and now < fin:
+            lines.append(
+                f"- Tiene una cita EN CURSO ahora mismo: {label} (termina a las "
+                f"{fin.astimezone(tz):%H:%M})." + _enlace(pasada)
+            )
+        else:
+            lines.append(
+                f"- Tuvo una cita que YA PASÓ: {label}. Nadie la marcó como "
+                "realizada ni como no asistida. NO se la menciones como algo que "
+                "viene (nada de \"tu demo es hoy a las…\"). Si no pudo llegar o "
+                "quiere otra, sin reproches: propose_slots y book_session — "
+                "reschedule_session solo mueve citas que todavía no pasan."
+            )
+
+    if not isinstance(nxt, dict) and not isinstance(pasada, dict):
+        lines.append(
+            "- El lead NO tiene ninguna cita por delante. Si en el historial se "
+            "habló de una, ya pasó, se canceló o se movió: no la afirmes como vigente."
+        )
+    return lines
+
+
 def build_system_prompt(
     *,
     profile: BusinessProfile,
@@ -221,14 +295,7 @@ def build_system_prompt(
             f"- Horarios YA ofrecidos al lead (los únicos reservables): {slot_txt}."
         )
 
-    booking = ((context or {}).get("booking") or {}).get("next")
-    if booking:
-        lines.append(
-            f"- El lead YA tiene cita agendada: {booking.get('label') or booking.get('scheduledAt')}. "
-            "No agendes otra. Si quiere moverla, usa reschedule_session (no "
-            "book_session); si quiere cancelarla, "
-            + ("usa cancel_session si está disponible; si no, handoff." if profile.cloud else "handoff.")
-        )
+    lines.extend(_booking_lines((context or {}).get("booking"), now))
 
     return (
         _chassis(profile)

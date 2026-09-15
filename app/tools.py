@@ -14,7 +14,7 @@ nunca tumba el turno.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any
 
 from app.crm import (
@@ -34,6 +34,10 @@ logger = logging.getLogger("nea.tools")
 # ofrecer cuando el lead pedía otro día: el catálogo reservable es más ancho
 # que el menú que se enseña.
 MAX_OFFERED = 12
+# Con `fecha`, el CRM ofrece TODAS las horas de ese día (hasta 24). El espejo
+# tiene que guardarlas todas: si guardara 12, Nea rechazaría por su cuenta la
+# hora 13 que el CRM sí ofreció.
+MAX_OFFERED_DIA = 24
 # Reparto pedido al CRM: hasta 3 huecos por día, en 5 días distintos.
 OFFER_PER_DAY = 3
 OFFER_DAYS = 5
@@ -74,14 +78,28 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "function": {
             "name": "propose_slots",
             "description": (
-                "Consulta la disponibilidad real de la agenda del negocio. Te "
-                "regresa los huecos libres REPARTIDOS entre los próximos días, "
-                "cada uno con su día en palabras (hoy/mañana/nombre del día). "
-                "Ofrece al lead máximo 3, los que embonen con lo que pidió. Si "
-                "el día que pidió no aparece, es que no hay agenda ese día: "
-                "dilo. SOLO estos horarios serán reservables después."
+                "Consulta la disponibilidad real de la agenda del negocio. Sin "
+                "fecha te regresa un REPARTO: unas horas de cada uno de los "
+                "próximos días, con su día en palabras (hoy/mañana/nombre del "
+                "día). Con fecha te regresa TODAS las horas libres de ese día, "
+                "o por qué no hay (cerrado, lleno, aún sin agenda). Si el lead "
+                "pide un día u hora que no viene en el reparto, consúltalo con "
+                "fecha antes de contestar. SOLO los horarios de la última "
+                "consulta con resultados serán reservables."
             ),
-            "parameters": {"type": "object", "properties": {}},
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "fecha": {
+                        "type": "string",
+                        "description": (
+                            "Opcional. Día concreto en AAAA-MM-DD, calculado con "
+                            "la fecha de hoy del contexto (\"el jueves de la "
+                            "próxima semana\" → su fecha)."
+                        ),
+                    }
+                },
+            },
         },
     },
     {
@@ -257,12 +275,56 @@ def _label_of(raw: dict[str, Any], start: datetime) -> str:
     return str(raw.get("label") or _iso_z(start))
 
 
+def _fecha_pedida(value: Any) -> str | None:
+    """AAAA-MM-DD válida, o None. El modelo a veces manda "jueves" o "17/09"."""
+    texto = str(value or "").strip()
+    try:
+        return date.fromisoformat(texto).isoformat() if len(texto) == 10 else None
+    except ValueError:
+        return None
+
+
+def _cobertura(query: dict[str, Any] | None) -> dict[str, Any]:
+    """Qué decirle al modelo de lo que NO viene en el reparto.
+
+    Antes se le decía "esta es TODA la agenda: los días que no aparecen NO
+    tienen agenda". No era cierto —el reparto son unas horas de unos cuantos
+    días— y en Tobaxis sonó así: "la próxima semana jueves o viernes ya no
+    tienen agenda" (no se habían consultado) y "el jueves a las 11 no hay"
+    (solo veía las 3 primeras horas del día).
+    """
+    base = (
+        "Ofrécele máximo 3, con su etiqueta tal cual (día incluido), los que "
+        "embonen con lo que pidió. Esta lista es un REPARTO, no toda la agenda: "
+        "si pide un día u hora que no ves aquí, llama propose_slots con "
+        "fecha=AAAA-MM-DD ANTES de contestarle. Nunca digas que un día u hora "
+        "no tiene agenda sin haber consultado ese día."
+    )
+    if not query:
+        return {"instrucciones": base}
+    out: dict[str, Any] = {"instrucciones": base}
+    if query.get("coveredUntil"):
+        out["revisado_hasta"] = query["coveredUntil"]
+        out["instrucciones"] += (
+            f" Los días posteriores al {query['coveredUntil']} NO se revisaron."
+        )
+    if query.get("perDay"):
+        out["instrucciones"] += (
+            f" De cada día solo ves hasta {query['perDay']} horas; puede haber más."
+        )
+    if query.get("horizonEnd"):
+        out["se_agenda_hasta"] = query["horizonEnd"]
+    return out
+
+
 def _slots_from_payload(
-    conversation_id: int, raw_slots: list[dict[str, Any]]
+    conversation_id: int,
+    raw_slots: list[dict[str, Any]],
+    limit: int = MAX_OFFERED,
 ) -> list[OfferedSlot]:
     """Convierte slots del CRM ({startUtc,endUtc,label}) a OfferedSlot, tolerante."""
     out: list[OfferedSlot] = []
-    for raw in raw_slots[:MAX_OFFERED]:
+    for raw in raw_slots[:limit]:
         start = _parse_utc(str(raw.get("startUtc") or ""))
         if start is None:
             continue
@@ -317,7 +379,7 @@ class ToolRuntime:
             if name == "update_ficha":
                 return await self._update_ficha(args)
             if name == "propose_slots":
-                return await self._propose_slots()
+                return await self._propose_slots(args)
             if name == "book_session":
                 return await self._book_session(args)
             if name == "reschedule_session":
@@ -344,19 +406,31 @@ class ToolRuntime:
         await self._ctx.crm.put_ficha(self._crm_conv_id, ficha)
         return {"ok": True}
 
-    async def _propose_slots(self) -> dict[str, Any]:
+    async def _propose_slots(self, args: dict[str, Any]) -> dict[str, Any]:
+        fecha = _fecha_pedida(args.get("fecha"))
+        if args.get("fecha") and fecha is None:
+            return {
+                "ok": False,
+                "error": "fecha_invalida",
+                "detalle": "fecha va como AAAA-MM-DD (p. ej. 2026-09-17); vuelve a llamar",
+            }
         # La conversación va SIEMPRE: es contra ella que el CRM registra la
         # oferta, y sin ella no hay nada reservable después.
         try:
-            raw = await self._ctx.crm.get_availability(
+            consulta = await self._ctx.crm.consultar_huecos(
                 self._crm_conv_id,
+                date=fecha,
                 limit=MAX_OFFERED,
                 per_day=OFFER_PER_DAY,
                 days=OFFER_DAYS,
             )
         except AgendaUnavailable:
             return self._sin_agenda()
-        slots = _slots_from_payload(self._conv.id, raw)
+        query = consulta.get("query") if isinstance(consulta.get("query"), dict) else None
+        if fecha:
+            return await self._huecos_del_dia(fecha, consulta["slots"], query)
+
+        slots = _slots_from_payload(self._conv.id, consulta["slots"])
         if not slots:
             return {
                 "ok": False,
@@ -371,11 +445,64 @@ class ToolRuntime:
             "dias_con_agenda": sorted(
                 {s.label.rsplit(",", 1)[0].strip() for s in slots}
             ),
-            "instrucciones": (
-                "esta es TODA la agenda abierta: los días que no aparecen aquí "
-                "NO tienen agenda, dilo en vez de mover al lead a otro día. "
-                "Ofrécele máximo 3, con su etiqueta tal cual (día incluido), "
-                "los que embonen con lo que pidió."
+            **_cobertura(query),
+        }
+
+    async def _huecos_del_dia(
+        self, fecha: str, raw: list[dict[str, Any]], query: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        """Un día concreto: todas sus horas, o por qué no hay ninguna.
+
+        Un CRM que no conoce `date` la ignora y devuelve el reparto de
+        siempre; eso se nota porque no regresa `query.date`. Entonces el día
+        NO se consultó, y decirle al lead "ese día no hay" sería mentirle.
+        """
+        if not query or query.get("date") != fecha:
+            return {
+                "ok": False,
+                "error": "consulta_por_dia_no_disponible",
+                "detalle": (
+                    f"no pude revisar el {fecha} en específico. NO digas que ese "
+                    "día no hay agenda: ofrécele los horarios que ya le diste o "
+                    "handoff para coordinarlo directo"
+                ),
+            }
+        status = query.get("status")
+        slots = _slots_from_payload(self._conv.id, raw, limit=MAX_OFFERED_DIA)
+        if status == "available" and slots:
+            await self._ctx.store.replace_offered_slots(self._conv.id, slots)
+            self.proposed = True
+            return {
+                "ok": True,
+                "fecha": fecha,
+                "slots": _slots_for_llm(slots),
+                "instrucciones": (
+                    f"estas son TODAS las horas libres del {fecha}. Si la hora "
+                    "que pidió no está aquí, esa hora ya no está libre: dilo y "
+                    "ofrécele las más cercanas de ESTA lista, con su etiqueta tal "
+                    "cual. Máximo 3."
+                ),
+            }
+        # Sin horas ese día. La oferta anterior se conserva (igual que en el
+        # CRM): lo que ya se le ofreció sigue siendo reservable.
+        motivo = {
+            "closed": f"el {fecha} el negocio no abre",
+            "full": f"el {fecha} ya no quedan horarios libres",
+            "past": f"el {fecha} ya pasó; confirma qué día quiso decir",
+            "beyond_horizon": (
+                f"todavía no se abre agenda para el {fecha} (se agenda hasta el "
+                f"{query.get('horizonEnd')}). Dilo así — no es que esté lleno — y "
+                "ofrécele lo más lejano que sí haya o que te escriba más cerca de la fecha"
+            ),
+        }.get(str(status), f"el {fecha} no tiene horarios libres")
+        return {
+            "ok": False,
+            "error": "dia_sin_horarios",
+            "fecha": fecha,
+            "estado": status,
+            "detalle": (
+                f"{motivo}. Díselo derecho y ofrécele otro día — NUNCA acomodes "
+                "su petición en otro día como si fuera lo mismo."
             ),
         }
 
