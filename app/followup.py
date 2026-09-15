@@ -40,6 +40,8 @@ class FollowupWorker:
                 logger.exception("followup: fallo en el barrido")
 
     async def tick(self, now: datetime | None = None) -> None:
+        if self._ctx.settings.cloud_mode:
+            return  # Cloud coordination is opt-in and durable in the CRM, never a second sender.
         now = now or utcnow()
         for conv in await self._ctx.store.due_followups(now):
             # Claim atómico ANTES de enviar: jamás un segundo empujón.

@@ -39,6 +39,8 @@ class BusinessProfile:
     """Todo lo que el negocio configura del agente. Solo texto plano: el
     chasis decide dónde va cada pieza dentro del system prompt."""
 
+    cloud: bool = False
+    config_version: int = 1
     agent_name: str = "Nea"
     tone: str | None = None
     instructions: str | None = None
@@ -65,6 +67,8 @@ def profile_from_payload(payload: dict[str, Any], default_name: str) -> Business
         if isinstance(r, dict) and r.get("url")
     ]
     return BusinessProfile(
+        cloud=prof.get("cloud") is True,
+        config_version=int(prof.get("configVersion") or 1),
         agent_name=str(prof.get("name") or default_name),
         tone=prof.get("tone") or None,
         instructions=prof.get("instructions") or None,
@@ -115,7 +119,7 @@ class ProfileProvider:
 
     async def get(self) -> BusinessProfile:
         now = time.monotonic()
-        if self._cached is not None and (now - self._fetched_at) < self._ttl:
+        if self._cached is not None and not self._cached.cloud and (now - self._fetched_at) < self._ttl:
             return self._cached
 
         payload = None
