@@ -183,7 +183,7 @@ AGENDA_V2_SCHEMAS = [
 AGENDA_TOOLS = frozenset({"propose_slots", "book_session", "reschedule_session"})
 
 
-def tool_schemas(agenda_enabled: bool = True, agenda_v2: bool = False) -> list[dict[str, Any]]:
+def tool_schemas(agenda_enabled: bool = True, agenda_v2: bool = False, coordination: bool = False) -> list[dict[str, Any]]:
     """El catálogo que se le ofrece al modelo en ESTE turno.
 
     Contra un CRM sin agenda no se le enseñan las herramientas de agendar: si
@@ -200,7 +200,7 @@ def tool_schemas(agenda_enabled: bool = True, agenda_v2: bool = False) -> list[d
                     params = tool["function"]["parameters"]
                     params["properties"]["selection_token"] = {"type": "string", "description": "Token de list_bookings de la cita elegida y confirmada por el cliente"}
                     params["required"].append("selection_token")
-            return schemas + AGENDA_V2_SCHEMAS
+            return schemas + AGENDA_V2_SCHEMAS + ([{"type": "function", "function": {"name": "coordination_consent", "description": "Registra consentimiento EXPLÍCITO para un único recordatorio de coordinación tras 24 horas sin reservar. Nunca deduzcas consentimiento por pedir una cita. consent=false si rechaza seguimiento. Solo tras ofrecer horarios.", "parameters": {"type": "object", "properties": {"consent": {"type": "boolean"}}, "required": ["consent"]}}}] if coordination else [])
         return TOOL_SCHEMAS
     return [
         t
@@ -304,6 +304,10 @@ class ToolRuntime:
 
     async def execute(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         try:
+            if name == "coordination_consent" and getattr(self._ctx.crm, "supports_coordination", False):
+                if not isinstance(args.get("consent"), bool):
+                    return {"ok": False, "error": "explicit_consent_required"}
+                return await self._ctx.crm.set_coordination_consent(self._crm_conv_id, args["consent"])
             if name == "list_bookings" and getattr(self._ctx.crm, "supports_agenda_v2", False):
                 return {"ok": True, "bookings": await self._ctx.crm.list_bookings(self._crm_conv_id)}
             if name == "cancel_session" and getattr(self._ctx.crm, "supports_agenda_v2", False):

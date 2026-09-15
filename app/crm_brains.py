@@ -112,6 +112,12 @@ class BrainsCrmClient(CrmClient):
         if self.supports_agenda_v2:
             self._envelopes[conversation_id] = {"dispatchId": payload.get("dispatchId"), "brainGeneration": payload.get("brainGeneration")}
 
+    async def set_coordination_consent(self, conversation_id: str, consent: bool) -> dict[str, Any]:
+        response = await self._request("POST", "/api/brains/agenda/followup", json={"conversationId": conversation_id, "consent": consent, **self._envelopes.get(conversation_id, {})})
+        if not response.is_success:
+            raise CrmConflict("followup_not_allowed")
+        return response.json()
+
     async def list_bookings(self, conversation_id: str) -> list[dict[str, Any]]:
         response = await self._request("GET", "/api/brains/agenda/bookings", params={"conversationId": conversation_id})
         if not response.is_success:
@@ -146,7 +152,7 @@ class BrainsCrmClient(CrmClient):
         despacho — una para las credenciales y otra dentro del turno.
         """
         resp = await self._request(
-            "GET", "/api/bot/context", params={"conversationId": conversation_id}
+            "GET", "/api/bot/context", params={"conversationId": conversation_id, "contextVersion": "2"}
         )
         if resp.status_code != 200:
             logger.warning(
@@ -157,6 +163,7 @@ class BrainsCrmClient(CrmClient):
             return None
         data: dict[str, Any] = resp.json()
         self._perfil = _perfil_desde_contexto(data)
+        self.supports_coordination = bool((data.get("agent") or {}).get("coordinationFollowupEnabled"))
         self._llm = data.get("llm") or None
         self._precargado[conversation_id] = data
         return data
@@ -237,10 +244,11 @@ class BrainsCrmClient(CrmClient):
         precargado = self._precargado.pop(conversation_id, None)
         if precargado is not None:
             self._perfil = _perfil_desde_contexto(precargado)
+            self.supports_coordination = bool((precargado.get("agent") or {}).get("coordinationFollowupEnabled"))
             return precargado
 
         resp = await self._request(
-            "GET", "/api/bot/context", params={"conversationId": conversation_id}
+            "GET", "/api/bot/context", params={"conversationId": conversation_id, "contextVersion": "2"}
         )
         if resp.status_code == 404:
             return None
@@ -248,7 +256,8 @@ class BrainsCrmClient(CrmClient):
             raise CrmError(f"context devolvió {resp.status_code}")
         data: dict[str, Any] = resp.json()
         self._perfil = _perfil_desde_contexto(data)
-        self._llm = data.get("llm") or self._llm
+        self.supports_coordination = bool((data.get("agent") or {}).get("coordinationFollowupEnabled"))
+        self._llm = data.get("llm") or None
         return data
 
     async def get_profile(self) -> dict[str, Any] | None:
@@ -348,13 +357,16 @@ def _perfil_desde_contexto(data: dict[str, Any]) -> dict[str, Any]:
     """
     agent = data.get("agent") or {}
     knowledge = data.get("knowledge") or []
-    bloques = [
-        f"P: {k.get('question')}\nR: {k.get('answer')}"
-        for k in knowledge
-        if isinstance(k, dict) and k.get("question") and k.get("answer")
-    ]
+    bloques = []
+    for k in knowledge:
+        if not isinstance(k, dict):
+            continue
+        if k.get("kind") == "block" and isinstance(k.get("content"), str):
+            bloques.append(k["content"])
+        elif k.get("kind", "qa") == "qa" and k.get("question") and k.get("answer"):
+            bloques.append(f"P: {k['question']}\nR: {k['answer']}")
     return {
-        "profile": agent,
+        "profile": {**agent, "cloud": True},
         "kb": "\n\n".join(bloques) if bloques else None,
         # Esta superficie todavía no expone los recursos del negocio (enlaces
         # que el agente puede compartir). Lista vacía en vez de omitirla: el

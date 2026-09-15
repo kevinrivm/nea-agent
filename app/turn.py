@@ -288,7 +288,7 @@ async def run_turn(
     else:
         if runtime.proposed:
             updates["phase"] = "agendando"
-        if sent and not conv.followup_sent:
+        if sent and not conv.followup_sent and not settings.cloud_mode:
             updates["followup_due_at"] = utcnow() + timedelta(
                 hours=settings.followup_hours
             )
@@ -344,7 +344,7 @@ async def _tool_loop(
     """Rondas de tool-calling hasta obtener texto final (o rendirse)."""
     for _ in range(MAX_TOOL_ROUNDS):
         reply = await ctx.llm.complete(
-            messages, tools=tool_schemas(ctx.agenda_enabled, bool(getattr(ctx.crm, "supports_agenda_v2", False)))
+            messages, tools=tool_schemas(ctx.agenda_enabled, bool(getattr(ctx.crm, "supports_agenda_v2", False)), bool(getattr(ctx.crm, "supports_coordination", False)))
         )
         if not reply.tool_calls:
             return reply.content  # turno de puro texto
