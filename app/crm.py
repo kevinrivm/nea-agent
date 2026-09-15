@@ -246,6 +246,36 @@ class CrmClient:
         slots = resp.json().get("slots") or []
         return list(slots)
 
+    async def consultar_huecos(
+        self,
+        conversation_id: str,
+        date: str | None = None,
+        limit: int = 12,
+        per_day: int | None = None,
+        days: int | None = None,
+    ) -> dict[str, Any]:
+        """Huecos + `query`: hasta dónde llega lo consultado.
+
+        `query` es None contra un CRM que todavía no la manda; quien consume
+        tiene que tratar entonces la lista como parcial. `date` lo ignora un
+        CRM que no la conoce, y por eso tampoco se da por consultado ese día
+        si no vuelve `query.date`.
+        """
+        params: dict[str, Any] = {"conversationId": conversation_id, "limit": limit}
+        if per_day:
+            params["perDay"] = per_day
+        if days:
+            params["days"] = days
+        if date:
+            params["date"] = date
+        resp = await self._request("GET", "/api/bot/availability", params=params)
+        if resp.status_code == 404:
+            raise AgendaUnavailable("este CRM no tiene el motor de agenda encendido")
+        if resp.status_code != 200:
+            raise CrmError(f"availability devolvió {resp.status_code}")
+        data = resp.json()
+        return {"slots": list(data.get("slots") or []), "query": data.get("query")}
+
     async def agenda_available(self) -> bool:
         """¿Este CRM ofrece agenda?
 
