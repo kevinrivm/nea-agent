@@ -140,3 +140,57 @@ async def test_mover_con_la_agenda_apagada_sigue_siendo_agenda_apagada(cliente):
     )
     with pytest.raises(AgendaUnavailable):
         await cliente.reschedule_booking("cv_1", "2026-09-15T15:00:00Z")
+
+
+# ── Citas cerradas: decir lo cierto, no inventar el motivo ────────────────
+
+CANCELADA = {
+    "id": "bk_c",
+    "startUtc": "2026-09-17T17:00:00.000Z",
+    "endUtc": "2026-09-17T17:30:00.000Z",
+    "label": "jueves, 17 de septiembre, 11:00",
+    "status": "cancelada",
+    "closedAt": "2026-09-15T04:38:00.000Z",
+}
+
+
+def test_cancelada_por_el_equipo_se_dice_asi():
+    # En vivo: "no quedó guardada, por alguna razón". Tenía que decir "se canceló".
+    ahora = datetime(2026, 9, 15, 4, 40, tzinfo=timezone.utc)
+    bloque = _bloque(
+        {"timezone": "America/Mexico_City", "next": None, "unresolved": None,
+         "lastClosed": {**CANCELADA, "cancelledBy": "equipo"}},
+        ahora,
+    )
+    assert "CANCELADA (la canceló el equipo del negocio)" in bloque
+    assert "No digas que hubo un error" in bloque
+
+
+def test_cancelada_por_el_agente():
+    ahora = datetime(2026, 9, 15, 4, 40, tzinfo=timezone.utc)
+    bloque = _bloque({"next": None, "unresolved": None, "lastClosed": {**CANCELADA, "cancelledBy": "agente"}}, ahora)
+    assert "la cancelaste tú a petición suya" in bloque
+
+
+def test_no_show_sin_reproches():
+    ahora = datetime(2026, 9, 18, 12, 0, tzinfo=timezone.utc)
+    bloque = _bloque({"next": None, "unresolved": None, "lastClosed": {**CANCELADA, "status": "no_show", "cancelledBy": None}}, ahora)
+    assert "NO ASISTIÓ" in bloque and "Sin reproches" in bloque
+
+
+def test_con_cita_nueva_la_cancelada_no_estorba():
+    ahora = datetime(2026, 9, 14, 15, 0, tzinfo=timezone.utc)
+    bloque = _bloque({"next": CITA, "unresolved": None, "lastClosed": {**CANCELADA, "cancelledBy": "equipo"}}, ahora)
+    assert "CANCELADA" not in bloque
+    assert "YA tiene cita agendada" in bloque
+
+
+def test_sin_citas_prohibe_inventar_el_motivo():
+    ahora = datetime(2026, 9, 15, 4, 40, tzinfo=timezone.utc)
+    bloque = _bloque({"next": None, "unresolved": None, "lastClosed": None}, ahora)
+    assert "NUNCA inventes el motivo" in bloque
+
+
+def test_el_chasis_prohibe_inventar_fallas():
+    ahora = datetime(2026, 9, 15, 4, 40, tzinfo=timezone.utc)
+    assert "Inventes fallas del sistema" in _prompt(None, ahora)
