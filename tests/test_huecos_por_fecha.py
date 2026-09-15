@@ -97,7 +97,7 @@ async def test_con_fecha_trae_todas_las_horas_y_las_deja_reservables(
     assert result["ok"] is True
     assert len(result["slots"]) == 16
     assert any(s["label"].endswith("11:00") for s in result["slots"])
-    assert "TODAS las horas libres del 2026-09-10" in result["instrucciones"]
+    assert "horas libres del 2026-09-10" in result["instrucciones"]
     # Las 16 son reservables: el espejo no puede recortar lo que el CRM ofreció.
     assert len(await ctx.store.get_offered_slots(conv.id)) == 16
 
@@ -174,3 +174,52 @@ async def test_fecha_mal_escrita_se_corrige_sin_ir_al_crm(runtime_y_ctx, respx_m
     result = await runtime.execute("propose_slots", {"fecha": "jueves"})
     assert result["error"] == "fecha_invalida"
     assert route.call_count == 0
+
+
+async def test_con_fecha_la_lista_de_horas_va_aparte(runtime_y_ctx, respx_mock):
+    # En la autoprueba con LLM real, con las 11:00 dentro de `slots`, el modelo
+    # contestó "a las 11 no tengo espacio". La lista corta no se presta a eso.
+    runtime, _, _ = runtime_y_ctx
+    respx_mock.get(AVAILABILITY).mock(
+        return_value=httpx.Response(
+            200,
+            json={"slots": _horas("2026-09-10", 8), "query": {"date": "2026-09-10", "status": "available"}},
+        )
+    )
+    result = await runtime.execute("propose_slots", {"fecha": "2026-09-10"})
+    assert "11:00" in result["horas_libres"]
+    assert "SÍ está libre" in result["instrucciones"]
+
+
+def test_el_prompt_trae_calendario_con_fechas_iso():
+    # "La próxima semana, jueves o viernes" dicho el jueves 10 se volvía el
+    # martes 15 y el miércoles 16. Con la tabla solo hay que buscar el renglón.
+    from datetime import datetime, timezone
+
+    from app.profile import BusinessProfile
+    from app.prompt import build_system_prompt
+    from app.state import Conversation
+
+    ahora = datetime(2026, 9, 10, 13, 6, tzinfo=timezone.utc)  # jueves 07:06 CDMX
+    prompt = build_system_prompt(
+        profile=BusinessProfile(), context=None,
+        conv=Conversation(id=1, wa_identity="x", greeted=True), now=ahora,
+    )
+    assert "hoy jueves 10 = 2026-09-10" in prompt
+    assert "PRÓXIMA SEMANA: lunes 14 = 2026-09-14" in prompt and "jueves 17 = 2026-09-17" in prompt
+    assert "viernes 18 = 2026-09-18" in prompt
+
+
+def test_sin_agenda_no_hay_calendario():
+    from datetime import datetime, timezone
+
+    from app.profile import BusinessProfile
+    from app.prompt import build_system_prompt
+    from app.state import Conversation
+
+    prompt = build_system_prompt(
+        profile=BusinessProfile(), context=None,
+        conv=Conversation(id=1, wa_identity="x", greeted=True),
+        agenda=False, now=datetime(2026, 9, 10, 13, 6, tzinfo=timezone.utc),
+    )
+    assert "Calendario" not in prompt

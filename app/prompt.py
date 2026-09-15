@@ -147,6 +147,33 @@ def fecha_es(dt: datetime, tz: ZoneInfo) -> str:
     )
 
 
+DIAS_CALENDARIO = 14
+
+
+def calendario(now: datetime, tz: ZoneInfo, dias: int = DIAS_CALENDARIO) -> str:
+    """Los próximos días con su AAAA-MM-DD, agrupados por semana (lunes a domingo).
+
+    El modelo no hace aritmética de calendario confiable: en la autoprueba
+    con los casos de Tobaxis, "la próxima semana, jueves o viernes" dicho un
+    jueves 10 se consultó como martes 15 y miércoles 16, y con una lista
+    corrida, como lunes 14. Con la semana nombrada solo tiene que buscar el
+    renglón: "la próxima semana" → "PRÓXIMA SEMANA: … jueves 17 = 2026-09-17".
+    """
+    local = now.astimezone(tz)
+    nombres = ("ESTA SEMANA", "PRÓXIMA SEMANA", "EN DOS SEMANAS", "EN TRES SEMANAS")
+    semanas: dict[int, list[str]] = {}
+    for i in range(dias):
+        dia = local + timedelta(days=i)
+        semana = (dia.date() - (local.date() - timedelta(days=local.weekday()))).days // 7
+        pref = "hoy " if i == 0 else "mañana " if i == 1 else ""
+        semanas.setdefault(semana, []).append(
+            f"{pref}{DIAS[dia.weekday()]} {dia.day} = {dia:%Y-%m-%d}"
+        )
+    return " | ".join(
+        f"{nombres[min(n, len(nombres) - 1)]}: {', '.join(d)}" for n, d in semanas.items()
+    )
+
+
 def _fmt_local(dt: datetime, tz: ZoneInfo) -> str:
     local = dt.astimezone(tz)
     return f"{fecha_es(dt, tz)}, {local:%H:%M} ({tz.key})"
@@ -259,6 +286,8 @@ def build_system_prompt(
         "día de mañana\" — si el lead lo usa para una fecha y no queda "
         "clarísimo, pregúntale antes de reservar nada."
     )
+    if agenda:
+        lines.append(f"- Calendario (para la fecha de propose_slots): {calendario(now, tz)}.")
 
     contact = (context or {}).get("contact") or {}
     lead = (context or {}).get("lead") or {}
