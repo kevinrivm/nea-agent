@@ -147,6 +147,26 @@ def fecha_es(dt: datetime, tz: ZoneInfo) -> str:
     )
 
 
+DIAS_CALENDARIO = 14
+
+
+def calendario(now: datetime, tz: ZoneInfo, dias: int = DIAS_CALENDARIO) -> str:
+    """"hoy jueves 10 = 2026-09-10; viernes 11 = 2026-09-11; …" en la zona dada.
+
+    El modelo no hace aritmética de calendario confiable: en la autoprueba
+    con los casos de Tobaxis, "la próxima semana, jueves o viernes" dicho un
+    jueves 10 se convirtió en el martes 15 y el miércoles 16. Con la tabla
+    delante solo tiene que buscar el renglón.
+    """
+    local = now.astimezone(tz)
+    partes = []
+    for i in range(dias):
+        dia = local + timedelta(days=i)
+        pref = "hoy " if i == 0 else "mañana " if i == 1 else ""
+        partes.append(f"{pref}{DIAS[dia.weekday()]} {dia.day} = {dia:%Y-%m-%d}")
+    return "; ".join(partes)
+
+
 def _fmt_local(dt: datetime, tz: ZoneInfo) -> str:
     local = dt.astimezone(tz)
     return f"{fecha_es(dt, tz)}, {local:%H:%M} ({tz.key})"
@@ -259,6 +279,8 @@ def build_system_prompt(
         "día de mañana\" — si el lead lo usa para una fecha y no queda "
         "clarísimo, pregúntale antes de reservar nada."
     )
+    if agenda:
+        lines.append(f"- Calendario (para la fecha de propose_slots): {calendario(now, tz)}.")
 
     contact = (context or {}).get("contact") or {}
     lead = (context or {}).get("lead") or {}

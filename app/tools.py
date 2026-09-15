@@ -470,17 +470,25 @@ class ToolRuntime:
         status = query.get("status")
         slots = _slots_from_payload(self._conv.id, raw, limit=MAX_OFFERED_DIA)
         if status == "available" and slots:
+            horas = [s.label.rsplit(",", 1)[-1].strip() for s in slots]
             await self._ctx.store.replace_offered_slots(self._conv.id, slots)
             self.proposed = True
             return {
                 "ok": True,
                 "fecha": fecha,
+                # La lista corta de horas va aparte a propósito: en la
+                # autoprueba, con las 11:00 dentro de `slots`, el modelo
+                # contestó "a las 11 no tengo espacio". Leer "11:00" en una
+                # lista de horas no se presta a esa confusión.
+                "horas_libres": horas,
                 "slots": _slots_for_llm(slots),
                 "instrucciones": (
-                    f"estas son TODAS las horas libres del {fecha}. Si la hora "
-                    "que pidió no está aquí, esa hora ya no está libre: dilo y "
-                    "ofrécele las más cercanas de ESTA lista, con su etiqueta tal "
-                    "cual. Máximo 3."
+                    f"horas libres del {fecha} (hora del negocio): "
+                    f"{', '.join(horas)}. Si la hora que pidió ESTÁ en esa "
+                    "lista, SÍ está libre: ofrécesela. Si no está, dilo y "
+                    "ofrécele las más cercanas de esa lista, con su etiqueta tal "
+                    "cual. Máximo 3. Para reservar usa el start_utc del slot "
+                    "(viene en UTC, no se lo digas al lead)."
                 ),
             }
         # Sin horas ese día. La oferta anterior se conserva (igual que en el
