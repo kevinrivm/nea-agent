@@ -265,9 +265,10 @@ async def run_turn(
     # --- Enviar la respuesta (SIEMPRE vía el CRM, nunca Meta directo) -----
     sent = False
     if final_text and final_text.strip():
-        sent = await _send(ctx, conv.id, str(crm_conv_id), final_text.strip())
+        final_text = runtime.finalize_reply(final_text.strip())
+        sent = await _send(ctx, conv.id, str(crm_conv_id), final_text)
         if sent:
-            await ctx.store.add_message(conv.id, "assistant", final_text.strip())
+            await ctx.store.add_message(conv.id, "assistant", final_text)
 
     # El handoff se ejecuta DESPUÉS de la despedida (si no, el CRM la rechaza
     # con 409 ai_paused).
