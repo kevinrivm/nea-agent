@@ -29,6 +29,17 @@ async def test_envelope_and_same_operation_retry(respx_mock):
     assert len(bodies[0]["idempotencyKey"]) == 64
     await client.aclose()
 
+async def test_booking_sends_explicit_reminder_consent(respx_mock):
+    client=BrainsCrmClient("https://crm.test","synthetic","org-a")
+    client.registrar_despacho("cv-a","dispatch-a")
+    client.registrar_envelope("cv-a",{"dispatchId":"dispatch-a","brainGeneration":7,"capabilities":["agenda_v2"]})
+    route=respx_mock.post("https://crm.test/api/brains/agenda/book").mock(return_value=httpx.Response(201,json={"ok":True,"booking":{"id":"booking-a","reminderConsent":True}}))
+    result=await client.create_booking("cv-a","2026-10-20T12:00:00Z",reminder_consent=True)
+    body=json.loads(route.calls[0].request.content)
+    assert body["reminderConsent"] is True
+    assert result["reminderConsent"] is True
+    await client.aclose()
+
 async def test_cancel_keeps_exact_selected_token(respx_mock):
     client=BrainsCrmClient("https://crm.test","synthetic","org-a")
     client.registrar_despacho("cv-a","dispatch-a")

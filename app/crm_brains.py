@@ -336,9 +336,9 @@ class BrainsCrmClient(CrmClient):
         return {"slots": list(data.get("slots") or []), "query": data.get("query")}
 
     async def create_booking(
-        self, conversation_id: str, start_utc: str
+        self, conversation_id: str, start_utc: str, reminder_consent: bool = False
     ) -> dict[str, Any]:
-        return await self._agendar("POST", conversation_id, start_utc, "bookings")
+        return await self._agendar("POST", conversation_id, start_utc, "bookings", reminder_consent=reminder_consent)
 
     async def reschedule_booking(
         self, conversation_id: str, start_utc: str, selection_token: str | None = None
@@ -346,11 +346,14 @@ class BrainsCrmClient(CrmClient):
         return await self._agendar("PATCH", conversation_id, start_utc, "reschedule", selection_token)
 
     async def _agendar(
-        self, method: str, conversation_id: str, start_utc: str, que: str, selection_token: str | None = None
+        self, method: str, conversation_id: str, start_utc: str, que: str, selection_token: str | None = None, reminder_consent: bool = False
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"conversationId": conversation_id, "startUtc": start_utc}
         if self.supports_agenda_v2:
-            body.update(self._operation(conversation_id, method, start_utc + (selection_token or "")))
+            operation_value = start_utc + (selection_token or "") + (":reminders" if reminder_consent else "")
+            body.update(self._operation(conversation_id, method, operation_value))
+            if method == "POST":
+                body["reminderConsent"] = reminder_consent
             if method == "PATCH":
                 body.update(selectionToken=selection_token, confirmation=True)
         resp = await self._request(

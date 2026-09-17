@@ -78,6 +78,15 @@ async def test_book_acepta_slot_ofrecido_epoch_exacto(runtime_y_ctx, respx_mock)
     assert await ctx.store.get_offered_slots(conv.id) == []
 
 
+async def test_booking_confirmation_includes_authoritative_zoom_link(runtime_y_ctx):
+    runtime, _, _ = runtime_y_ctx
+    runtime.booking_confirmation = {"label":"viernes 18 de septiembre, 10:00 am","meeting_url":"https://zoom.us/j/123","link_pending":False,"reminder_consent":True}
+    reply=runtime.finalize_reply("Te mandaré el enlace después")
+    assert "https://zoom.us/j/123" in reply
+    assert "después" not in reply
+    assert "recordatorios" in reply
+
+
 async def test_book_slot_taken_ofrece_alternativas_frescas(runtime_y_ctx, respx_mock):
     runtime, ctx, conv = runtime_y_ctx
     frescos = [
