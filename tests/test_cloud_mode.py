@@ -291,6 +291,31 @@ class TestCliente:
         assert ctx is not None
         assert ruta.calls.last.request.url.params["conversationId"] == CONV
 
+    @respx.mock
+    async def test_descarga_adjuntos_por_la_superficie_del_cerebro(
+        self, cliente: BrainsCrmClient
+    ) -> None:
+        """El id dinámico también debe traducirse de ``bot`` a ``brains``.
+
+        Sin esta traducción, las notas de voz llegan al cerebro pero el CRM
+        rechaza la descarga antes de que el modelo pueda transcribirlas.
+        """
+        ruta = respx.get(f"{CRM_URL}/api/brains/media/media-audio-1").mock(
+            return_value=httpx.Response(
+                200,
+                content=b"audio-ogg",
+                headers={"content-type": "audio/ogg; codecs=opus"},
+            )
+        )
+
+        data, mime = await cliente.get_media("media-audio-1")
+
+        assert data == b"audio-ogg"
+        assert mime == "audio/ogg; codecs=opus"
+        pedido = ruta.calls.last.request
+        assert pedido.headers["authorization"] == f"Bearer {SECRETO}"
+        assert pedido.headers["x-vocero-organization"] == "mi-negocio"
+
     async def test_sin_despacho_previo_no_hay_contexto(
         self, cliente: BrainsCrmClient
     ) -> None:

@@ -49,6 +49,14 @@ RUTAS = {
     "/api/bot/bookings": "/api/brains/agenda/book",
 }
 
+# Las rutas con un identificador al final no pueden vivir en ``RUTAS``: el
+# valor concreto (por ejemplo el id de Meta) cambia en cada petición. Mantener
+# el prefijo explícito evita que el cliente cloud herede accidentalmente la
+# superficie ``/api/bot`` y sea rechazado antes de descargar el adjunto.
+RUTAS_POR_PREFIJO = {
+    "/api/bot/media/": "/api/brains/media/",
+}
+
 
 class BrainsCrmClient(CrmClient):
     def __init__(
@@ -179,7 +187,13 @@ class BrainsCrmClient(CrmClient):
         return self._llm
 
     def _request(self, method: str, url: str, **kwargs: Any):  # type: ignore[override]
-        return super()._request(method, RUTAS.get(url, url), **kwargs)
+        ruta = RUTAS.get(url, url)
+        if ruta == url:
+            for origen, destino in RUTAS_POR_PREFIJO.items():
+                if url.startswith(origen):
+                    ruta = destino + url.removeprefix(origen)
+                    break
+        return super()._request(method, ruta, **kwargs)
 
     async def send_message(
         self, conversation_id: str, text: str, dispatch_id: str = ""
