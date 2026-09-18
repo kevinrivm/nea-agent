@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from typing import Any, AsyncIterator
@@ -257,6 +258,25 @@ async def run_turn(
         )
         return
 
+    # Última red antes de enviar: el modelo repitió un mensaje que el lead ya
+    # tiene, o escribió una nota para sí mismo. Se le pide UNA vez más; si
+    # vuelve a salir mal, silencio + handoff error, igual que un LLM caído.
+    previos = [m.content for m in recientes if m.role == "assistant"]
+    motivo = _respuesta_invalida(final_text, previos)
+    if motivo is not None:
+        logger.warning("turno %s: la respuesta %s — pido otra", identity, motivo)
+        messages.append({"role": "assistant", "content": final_text})
+        messages.append({"role": "system", "content": CORRIGE_RESPUESTA.format(motivo=motivo)})
+        try:
+            final_text = await _tool_loop(ctx, messages, runtime)
+        except LlmExhausted:
+            final_text = None
+        if final_text is None or _respuesta_invalida(final_text, previos):
+            logger.error("turno %s: la segunda respuesta tampoco sirve — silencio + handoff error", identity)
+            await _safe_handoff(ctx, str(crm_conv_id), "error")
+            await ctx.store.update_conversation(conv.id, phase="cerrada", followup_due_at=None)
+            return
+
     # Backstop determinista: al tercer strike el handoff SUCEDE, lo haya
     # llamado el modelo o no (la regla de negocio no depende de su humor).
     if streak >= 3 and runtime.handoff_reason is None:
@@ -339,10 +359,52 @@ async def _fetch_context(ctx: AppContext, identity: str) -> dict[str, Any] | Non
     return None
 
 
+REPETICION_MIN = 40
+CORRIGE_RESPUESTA = (
+    "Ese texto NO se le envió al lead: {motivo}. Escribe ahora el mensaje de "
+    "WhatsApp que responde a su ÚLTIMO mensaje, en tu voz y sin repetir nada "
+    "que ya le hayas escrito."
+)
+
+
+def _respuesta_invalida(texto: str | None, previos: list[str]) -> str | None:
+    """Por qué este texto no puede salir, o None si puede.
+
+    Dos fallos que el lead SÍ ve y que ningún prompt evita del todo: repetirle
+    palabra por palabra un mensaje que ya tiene (en producción, el saludo del
+    principio a media conversación) y mandarle una nota interna entre
+    paréntesis («(Registro actualizado — conversación cerrada…)»).
+    """
+    if not texto or not texto.strip():
+        return None
+    plano = " ".join(texto.split())
+    if re.fullmatch(r"[(\[].*[)\]]", plano):
+        return "era una nota interna entre paréntesis"
+    # Un «¡Va!» o un «Perfecto 👍» pueden repetirse sin que nadie lo note; un
+    # mensaje con contenido repetido entero, no.
+    if len(plano) >= REPETICION_MIN and any(plano == " ".join(p.split()) for p in previos):
+        return "repetía palabra por palabra un mensaje que ya le enviaste"
+    return None
+
+
 async def _tool_loop(
     ctx: AppContext, messages: list[dict[str, Any]], runtime: ToolRuntime
 ) -> str | None:
-    """Rondas de tool-calling hasta obtener texto final (o rendirse)."""
+    """Rondas de tool-calling hasta obtener texto final (o rendirse).
+
+    El texto que el modelo escribe JUNTO a una llamada de herramienta no entra
+    al historial de la ronda siguiente. GLM, el modelo de cloud, suele
+    escribir el mensaje y llamar la herramienta en la misma respuesta; al
+    verse ese texto en el historial lo daba por enviado y la ronda siguiente
+    salía de relleno: un «¡Éxito!» suelto, una nota interna entre paréntesis
+    o el saludo del principio otra vez. Solo eso le llegaba al lead
+    (aishiagency, 18 sep 2026; reproducido 8 de 11 veces).
+
+    Tampoco se envía ese texto tal cual: la mitad de las veces es un
+    preámbulo («Anoto eso 👌») que espera la ronda siguiente para hacer la
+    pregunta. Sin él a la vista, el modelo escribe la respuesta completa ya
+    con el resultado de la herramienta, que es lo que siempre hizo bien.
+    """
     for _ in range(MAX_TOOL_ROUNDS):
         reply = await ctx.llm.complete(
             messages, tools=tool_schemas(ctx.agenda_enabled, bool(getattr(ctx.crm, "supports_agenda_v2", False)), bool(getattr(ctx.crm, "supports_coordination", False)))
@@ -353,7 +415,7 @@ async def _tool_loop(
         messages.append(
             {
                 "role": "assistant",
-                "content": reply.content,
+                "content": None,  # ver el docstring: no se enseña como ya dicho
                 "tool_calls": [
                     {
                         "id": tc.id,
