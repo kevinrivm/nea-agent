@@ -127,8 +127,16 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                             "en vez de reservar."
                         ),
                     },
+                    "recordatorios_aceptados": {
+                        "type": "boolean",
+                        "description": (
+                            "true SOLO si el lead autorizó explícitamente recibir "
+                            "recordatorios de ESTA cita. Reservar o confirmar el "
+                            "horario no implica permiso. Si no lo dijo o lo rechazó, false."
+                        ),
+                    },
                 },
-                "required": ["start_utc", "dia_confirmado"],
+                "required": ["start_utc", "dia_confirmado", "recordatorios_aceptados"],
             },
         },
     },
@@ -361,6 +369,7 @@ class ToolRuntime:
         # Efectos observables por turn.py:
         self.handoff_reason: str | None = None  # se ejecuta DESPUÉS de la despedida
         self.booked = False
+        self.booking_confirmation: dict[str, Any] | None = None
         self.routed_out = False
         self.proposed = False
 
@@ -613,9 +622,15 @@ class ToolRuntime:
         if error is not None or chosen is None:
             return error or {"ok": False, "error": "slot_no_ofrecido"}
         try:
-            result = await self._ctx.crm.create_booking(
-                self._crm_conv_id, _iso_z(chosen.start_utc)
-            )
+            consent = args.get("recordatorios_aceptados") is True
+            if getattr(self._ctx.crm, "supports_agenda_v2", False):
+                result = await self._ctx.crm.create_booking(
+                    self._crm_conv_id, _iso_z(chosen.start_utc), reminder_consent=consent
+                )
+            else:
+                result = await self._ctx.crm.create_booking(
+                    self._crm_conv_id, _iso_z(chosen.start_utc)
+                )
         except SlotTaken as exc:
             # El slot se ocupó entre oferta y elección: alternativas frescas.
             fresh = _slots_from_payload(self._conv.id, exc.slots)
@@ -632,6 +647,13 @@ class ToolRuntime:
             return self._sin_agenda()
         await self._ctx.store.clear_offered_slots(self._conv.id)
         self.booked = True
+        meeting_url, link_pending = _meeting(result)
+        self.booking_confirmation = {
+            "label": chosen.label or result.get("label"),
+            "meeting_url": meeting_url,
+            "link_pending": link_pending,
+            "reminder_consent": bool(result.get("reminderConsent", False)),
+        }
         try:
             await self._ctx.crm.put_ficha(
                 self._crm_conv_id, {"calificado": True, "resultado": "agendo"}
@@ -643,8 +665,9 @@ class ToolRuntime:
             # La etiqueta del slot ofrecido trae el día en palabras; la del
             # CRM es la corta. Se repite ESTA para que el lead lea el día.
             "label": chosen.label or result.get("label"),
-            "meeting_url": _meeting(result)[0],
-            "enlace_pendiente": _meeting(result)[1],
+            "meeting_url": meeting_url,
+            "enlace_pendiente": link_pending,
+            "recordatorios_activados": bool(result.get("reminderConsent", False)),
             "instrucciones": (
                 "confirma el día COMPLETO y la hora tal cual dice label, "
                 "comparte meeting_url si viene y menciona lo que el negocio "
@@ -653,6 +676,21 @@ class ToolRuntime:
                 "momento, no prometas uno que no tienes"
             ),
         }
+
+    def finalize_reply(self, text: str) -> str:
+        """Booking confirmation is authoritative, not left to model wording."""
+        data = self.booking_confirmation
+        if not data:
+            return text
+        label = data.get("label") or "el horario acordado"
+        parts = [f"Listo, tu cita quedó confirmada para {label}."]
+        if data.get("meeting_url"):
+            parts.append(f"Enlace de Zoom: {data['meeting_url']}")
+        elif data.get("link_pending"):
+            parts.append("El enlace de la videollamada te llegará por aquí en un momento.")
+        if data.get("reminder_consent"):
+            parts.append("También quedaron activados los recordatorios que autorizaste.")
+        return "\n\n".join(parts)
 
     async def _reschedule_session(self, args: dict[str, Any]) -> dict[str, Any]:
         chosen, error = await self._resolve_offered(args, "reschedule_session")
