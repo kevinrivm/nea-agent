@@ -58,6 +58,13 @@ idempotentes al arranque · httpx (CRM y OpenAI) · pytest + respx · Docker
   ambos lados; desviarse un byte da 401 mudo en todo.
 - **Degradación silenciosa**: LLM/CRM fallando jamás rompe el webhook ni manda
   texto roto; tras reintentos → silencio + handoff `error`.
+- **Un turno sin CRM se reintenta, y solo ese.** Si el gate 2 no alcanza al
+  CRM (red, 5xx, o un 404 con el mensaje todavía en el relay), `TurnoSinCrm`
+  reprograma la MISMA ráfaga (`TURN_RETRY_DELAYS`): una por conversación, y
+  lo que el lead escriba mientras tanto se fusiona en ella. Agotadas las
+  esperas, handoff `error` en cuanto el CRM conteste. Nada posterior a leer el
+  contexto se reintenta así: repetir un turno que ya pensó o escribió es
+  contestarle dos veces al lead.
 - **Todo lo que sale a WhatsApp pasa por `app/formato.py`** (turno y
   seguimiento), y el historial guarda lo convertido: WhatsApp no pinta
   Markdown, y si el modelo se ve escribiéndolo lo sigue escribiendo. Las URL y
@@ -87,6 +94,11 @@ idempotentes al arranque · httpx (CRM y OpenAI) · pytest + respx · Docker
   (`app/agenda.py`): encender o apagar la bandera en el CRM llega sin
   reiniciar Nea. Sin agenda no se le enseñan al modelo las herramientas de
   agendar y el prompt se lo dice.
+- **No se ofrece lo que no hay con qué hacer.** Los recordatorios de la cita
+  existen solo con la agenda v2 de Vocero Cloud (`supports_agenda_v2`): sin
+  ella, `book_session` no lleva `recordatorios_aceptados` y el prompt dice que
+  no hay recordatorios. Un campo obligatorio en una herramienta es una
+  pregunta que el modelo le va a hacer al lead.
 
 ## Definición de Hecho
 
