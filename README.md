@@ -84,8 +84,10 @@ contra Postgres, la cubren las pruebas de `tests/test_pg_store.py` (ver
 Definición de Hecho).
 
 Herramientas del LLM: `update_ficha` (calificación), `propose_slots` /
-`book_session` (agenda), `route_out` (no califica; comparte los recursos
-alternativos del perfil), `handoff` (pausa la IA en el CRM).
+`book_session` / `reschedule_session` (agenda, solo si el CRM agenda),
+`route_out` (no califica; comparte los recursos alternativos del perfil),
+`handoff` (pausa la IA en el CRM). En modo cloud, con la agenda v2 de Vocero
+Cloud, también `list_bookings` y `cancel_session`.
 
 ### Modo cloud (opcional): detrás de un Vocero multitenant
 
@@ -425,7 +427,7 @@ Los NUNCA del chasis en `app/prompt.py` no se relajan sin re-correr esa
 verificación de comportamiento.
 
 ```bash
-pytest -q          # 467 tests: 430 offline + 37 de PgStore, que se saltan sin Postgres
+pytest -q          # 496 tests: 457 offline + 39 de PgStore, que se saltan sin Postgres
 ```
 
 Las de `tests/test_pg_store.py` corren `PgStore` contra un Postgres de verdad
