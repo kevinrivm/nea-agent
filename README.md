@@ -435,6 +435,7 @@ Los NUNCA del chasis en `app/prompt.py` no se relajan sin re-correr esa
 verificación de comportamiento.
 
 ```bash
+pip install -r requirements-dev.txt   # pytest, respx y compañía, con versión exacta
 pytest -q          # 496 tests: 457 offline + 39 de PgStore, que se saltan sin Postgres
 ```
 
