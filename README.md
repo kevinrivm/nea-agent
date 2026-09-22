@@ -56,6 +56,15 @@ Meta Cloud API ── webhook ──► Nea (este repo)
                                   (Nea jamás llama a graph.facebook.com para enviar)
 ```
 
+**El relay es lo que hace que el CRM vea el mensaje.** Cada POST de Meta se
+encola en `relay_queue` (el Postgres de Nea) antes de parsear nada, y el
+`RelayWorker` se lo reenvía crudo al webhook del CRM —firma intacta, backoff
+hasta 24 h—. Si esa cola no sale, el CRM se queda sin los entrantes y sin los
+estados de entrega, y a un contacto nuevo Nea no le contesta:
+`/api/bot/context` responde 404 hasta que el relay aterriza. Como solo corre
+contra Postgres, la cubren las pruebas de `tests/test_pg_store.py` (ver
+Definición de Hecho).
+
 Herramientas del LLM: `update_ficha` (calificación), `propose_slots` /
 `book_session` (agenda), `route_out` (no califica; comparte los recursos
 alternativos del perfil), `handoff` (pausa la IA en el CRM).
@@ -115,9 +124,11 @@ con WhatsApp Cloud API apuntando su webhook a este servicio.
 
 **Si quieres que Nea agende, enciende el motor de agenda de Vocero**
 (`AGENDA=on` en el CRM): viene apagado por defecto. Nea lo detecta al arrancar
-— contra un CRM sin agenda no ofrece horarios ni promete citas, califica y
-escala a un humano. La agenda la lleva el CRM: Nea le pide los huecos, él
-registra lo ofrecido y solo acepta reservar uno de esos.
+y lo vuelve a preguntar cada minuto (`AGENDA_PROBE_TTL_SECONDS`), así que
+encenderlo no exige reiniciarla — contra un CRM sin agenda no ofrece horarios
+ni promete citas, califica y escala a un humano. La agenda la lleva el CRM:
+Nea le pide los huecos, él registra lo ofrecido y solo acepta reservar uno de
+esos.
 
 ```bash
 git clone https://github.com/kevinrivm/nea-agent && cd nea-agent
@@ -160,7 +171,17 @@ Los NUNCA del chasis en `app/prompt.py` no se relajan sin re-correr esa
 verificación de comportamiento.
 
 ```bash
-pytest -q          # 76 tests, todos offline
+pytest -q          # 366 tests: 330 offline + 36 de PgStore, que se saltan sin Postgres
+```
+
+Las de `tests/test_pg_store.py` corren `PgStore` contra un Postgres de verdad
+(`MemoryStore` no tiene SQL ni filas que mapear, y ahí es donde se rompió el
+relay). Apúntalas a un servidor desechable donde el usuario pueda crear bases:
+cada corrida crea la suya, le aplica las migraciones y la borra al terminar.
+En CI corren en su propio job con `postgres:16`.
+
+```bash
+TEST_DATABASE_URL=postgresql://usuario:clave@localhost:5432/postgres pytest -q tests/test_pg_store.py
 ```
 
 ## Configuración
