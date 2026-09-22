@@ -78,7 +78,7 @@ _NO_HEREDAR = re.compile(
     r"^APP_BASE|^BETTER_AUTH|^ENCRYPTION|^NEXT_|^NODE_ENV$|^PORT$|^CHANNELS$|"
     r"^ATRIBUCION$|^ALLOW_SIGNUP$|^ZOOM_|^GOOGLE_|^MEDIA_DIR$|^AGENT_|"
     r"^HISTORY_WINDOW$|^COALESCE_|^FOLLOWUP_|^STALL_|^TYPING_|^BRIEF_PATH$|"
-    r"^CAPTURE_PAYLOADS$|^SOURCE_COMMIT$|^VERIFY_TOKEN$",
+    r"^CAPTURE_PAYLOADS$|^SOURCE_COMMIT$|^VERIFY_TOKEN$|^TURN_RETRY_|^RELAY_",
     re.I,
 )
 
@@ -202,6 +202,19 @@ _MARKDOWN = [
     ("bloque ```", re.compile(r"```")),
     ("enlace [texto](url)", re.compile(r"\[[^\]]+\]\((?:https?://|www\.)[^)]+\)")),
 ]
+
+
+# Lo que Nea no puede afirmar con el reparto a la vista: que un día solo tiene
+# mañana (o tarde), o que en una franja no hay. El e2e contra raíz lo cazó:
+# «Mañana martes solo tengo por la mañana: 10:00, 10:30 u 11:00». Decir lo
+# que ve («solo alcanzo a ver…», «no veo si hay en la tarde») sí se vale.
+_NIEGA_HORAS = re.compile(
+    r"\b(solo|sólo|únicamente)\s+(tengo|hay|me quedan?|quedan?)\b[^.?!\n]*\b(mañana|tarde)\b"
+    r"|\bno\s+(tengo|hay|me queda|quedan?)\b[^.?!\n]*\b(en|por)\s+la\s+(mañana|tarde)\b",
+    re.I,
+)
+# Lo que Nea no puede ofrecer en modo estándar: el CRM raíz no manda recordatorios.
+_RECORDATORIO = re.compile(r"recordatorio|recordarte|te recuerdo", re.I)
 
 
 def artefactos_markdown(texto: str) -> list[str]:
@@ -1028,6 +1041,7 @@ class Prueba:
             or any(o["local"].startswith(manana) and o["local"][11:] >= "12:00" for o in citados),
             "cita_creada": bool(cita) and cita.get("status") == "agendada",
             "lead_avanzo_una_etapa": siguiente is not None and despues.get("id") == siguiente["id"],
+            "no_niega_horas_que_no_vio": not _NIEGA_HORAS.search(texto_oferta),
             "confirmacion_con_enlace_fijo": "Enlace de la reunión" in conf and SALA in conf,
             "confirmacion_sin_zoom": bool(conf) and "zoom" not in conf.lower(),
         }
@@ -1044,8 +1058,14 @@ class Prueba:
         r = self.esperar_respuesta(a, t0, "4: preguntar la hora")
         local = a.cita["local"]
         texto = "\n".join(s["texto"] for s in r)
-        ev = {"cita": local, "booking_en_context": bloque.get("booking"), "respuestas": r}
-        return bool(r) and menciona_hora(texto, int(local[11:13]), int(local[14:16])), ev
+        checks = {
+            "menciona_la_hora_de_la_cita": bool(r) and menciona_hora(texto, int(local[11:13]), int(local[14:16])),
+            # El CRM raíz no manda recordatorios: ofrecer uno es prometer algo
+            # que nadie va a cumplir.
+            "sin_ofrecer_recordatorio": not _RECORDATORIO.search(texto),
+        }
+        ev = {"cita": local, "booking_en_context": bloque.get("booking"), "respuestas": r, "checks": checks}
+        return all(checks.values()), ev
 
     def e5_handoff(self) -> tuple[bool, dict[str, Any]]:
         a = self.clientes["A"]
@@ -1088,6 +1108,14 @@ class Prueba:
         return ok, ev
 
     def e7_crm_caido(self) -> tuple[bool, dict[str, Any]]:
+        """El CRM se apaga ~20 s y el cliente escribe dos veces mientras tanto.
+
+        El relay encola los dos payloads y los entrega al volver; el turno,
+        que no alcanzó al CRM, se reintenta con la ráfaga completa. Lo que se
+        exige: los dos entrantes en la bandeja y UNA respuesta de Nea que
+        contesta los dos (un solo mensaje del lead en su historial, con los
+        dos textos), sin una segunda respuesta detrás.
+        """
         c = self.clientes["C"]
         assert self.proc_crm is not None
         self.proc_crm.detener()
@@ -1095,10 +1123,16 @@ class Prueba:
             return False, {"error": "el CRM no soltó el puerto al detenerlo"}
         self.nota(c, "CRM detenido")
         texto = "Hola, quisiera informes de sus servicios"
+        segundo = "¿Y cuánto cuesta la página web?"
         t0 = self.enviar(c, texto)
+        t_segundo: float | None = None
         cola = []
         fin = time.monotonic() + 20  # la caída que se simula: ~20 s
         while time.monotonic() < fin:
+            if t_segundo is None and time.time() - t0 >= 8:
+                # Pasado el coalesce del primero: abre su propio turno, que
+                # tampoco alcanza al CRM y se lleva la ráfaga que esperaba.
+                t_segundo = self.enviar(c, segundo)
             try:
                 cola.append((self.salud_nea().get("relay") or {}).get("pendientes"))
             except httpx.HTTPError:
@@ -1108,31 +1142,57 @@ class Prueba:
         self.arrancar_crm(calentar=False)
         self.nota(c, "CRM contesta /api/health")
         # La entrega la marca la cola de Nea: `pendientes` vuelve a 0 cuando el
-        # CRM aceptó el payload. Se mira antes de compilar nada más.
+        # CRM aceptó los payloads. Se mira antes de compilar nada más.
         vacia = hasta(lambda: (self.salud_nea().get("relay") or {}).get("pendientes") == 0, 180, 0.5)
         entregado_en = time.time() if vacia else None
         if entregado_en:
             self.nota(c, f"relay entregado al CRM ({entregado_en - self.crm_sano_en:.1f} s después de que el CRM volvió)")
         self.calentar()
-        llegada = self.esperar_entrante(c, texto, t0, 120)
-        if llegada is not None:
-            self.nota(c, "el entrante está en la bandeja del CRM")
-        r = self.esperar_silencio(c, t0, 45)
+        llegadas = [self.esperar_entrante(c, x, t0, 120) for x in (texto, segundo)]
+        if all(x is not None for x in llegadas):
+            self.nota(c, "los dos entrantes están en la bandeja del CRM")
+        # Los reintentos de Nea suman como mucho 10 min (TURN_RETRY_DELAYS);
+        # esta respuesta no cuenta para la latencia por turno: la mide la caída.
+        r = self.esperar_respuesta(c, t0, None, timeout=600)
+        respondio_en = instante(r[0]["at"]) if r else None
+        otra = self.esperar_silencio(c, time.time(), 30) if r else []
         conv = self.conversacion(c) or {}
-        desenlace = "respuesta" if r else ("handoff" if conv.get("handoffAt") else "silencio")
+        historial = consulta(
+            self.nea_db,
+            "select m.content from bot_message m join bot_conversation v on v.id = m.conversation_id "
+            "where v.wa_identity = $1 and m.role = 'user' order by m.id",
+            c.canonico,
+        )
+        del_lead = [h["content"] for h in historial]
         log = (self.out / "nea.log").read_text(encoding="utf-8", errors="replace").splitlines()
         ev = {
             "pendientes_en_relay_durante_la_caida": cola,
             "crm_de_vuelta_tras_s": round(self.crm_sano_en - t0, 1),
             "relay_entregado_tras_volver_s": round(entregado_en - self.crm_sano_en, 1) if entregado_en else None,
-            "inbound_en_bandeja": llegada is not None,
-            "desenlace_del_turno": desenlace,
+            "segundo_mensaje_tras_s": round(t_segundo - t0, 1) if t_segundo else None,
+            "entrantes_en_bandeja": [x is not None for x in llegadas],
+            "respuesta_tras_volver_el_crm_s": round(respondio_en - self.crm_sano_en, 1) if respondio_en else None,
             "respuestas": r,
+            "segunda_respuesta": otra,
+            "mensajes_del_lead_en_nea": del_lead,
             "handoff": {k: conv.get(k) for k in ("handoffAt", "handoffReason", "aiEnabled")},
-            "log_nea": [linea[-220:] for linea in log if c.canonico in linea or "relay" in linea][-12:],
+            "log_nea": [
+                linea[-240:]
+                for linea in log
+                if c.canonico in linea and ("reintento" in linea or "ráfaga" in linea or "CRM no" in linea)
+            ][-12:],
         }
-        # Lo que se exige es la entrega; el desenlace del turno se reporta.
-        return llegada is not None and entregado_en is not None and max((x or 0) for x in cola) >= 1, ev
+        checks = {
+            "relay_encolo_durante_la_caida": max((x or 0) for x in cola) >= 1,
+            "relay_entrego_al_volver": entregado_en is not None,
+            "los_dos_entrantes_en_la_bandeja": all(x is not None for x in llegadas),
+            "el_cliente_recibio_respuesta": bool(r),
+            "una_sola_respuesta": bool(r) and not otra,
+            "un_turno_con_los_dos_mensajes": len(del_lead) == 1 and texto in del_lead[0] and segundo in del_lead[0],
+            "sin_handoff": not conv.get("handoffAt"),
+        }
+        ev["checks"] = checks
+        return all(checks.values()), ev
 
     def e8_override(self) -> tuple[bool, dict[str, Any]]:
         ruta = f"/api/dev/wa-mock/graph/v25.0/{WABA}/subscribed_apps"
@@ -1259,10 +1319,10 @@ def main() -> int:
         prueba.correr(1, "primer contacto: relay a la bandeja y respuesta sin Markdown", prueba.e1_primer_contacto)
         prueba.correr(2, "estados delivered y read de la respuesta", prueba.e2_estados)
         prueba.correr(3, "agenda: huecos reales, cita, etapa y enlace fijo", prueba.e3_agenda)
-        prueba.correr(4, "contexto: Nea sabe a qué hora quedó la cita", prueba.e4_contexto_de_la_cita)
+        prueba.correr(4, "contexto: Nea sabe a qué hora quedó la cita y no ofrece recordatorios", prueba.e4_contexto_de_la_cita)
         prueba.correr(5, "handoff a una persona con despedida", prueba.e5_handoff)
         prueba.correr(6, "candado de cierre: despedida, silencio y reapertura", prueba.e6_candado)
-        prueba.correr(7, "CRM caído: el relay encolado entrega al volver", prueba.e7_crm_caido)
+        prueba.correr(7, "CRM caído: el relay entrega y el cliente recibe UNA respuesta al volver", prueba.e7_crm_caido)
         prueba.correr(8, "guardar la conexión no borra el override de la WABA", prueba.e8_override)
         prueba.correr(9, "/health de Nea: versión, modo estándar y relay en 0", prueba.e9_salud)
     finally:

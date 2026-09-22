@@ -231,18 +231,26 @@ python scripts/e2e_contra_raiz.py --crm-dir ../vocero-crm \
 # --escenarios 1-5,9 para correr solo algunos · --presupuesto 0.50 (USD)
 ```
 
+Los puertos son opciones (`--crm-port 3800`, `--nea-port 8100`,
+`--medidor-port 8190`, los de por defecto): para correr dos pares a la vez, cada
+uno con sus puertos, su `--out` y su propio Postgres. El `--crm-dir` tampoco se
+comparte entre corridas simultáneas: `next dev` escribe su `.next` ahí.
+
 **Qué comprueba**, con un cliente nuevo por historia: (1) el primer mensaje
 llega a la bandeja del CRM en segundos y la respuesta de Nea sale por el
 wa-mock sin Markdown; (2) `delivered` y `read` de Meta avanzan el estado del
 mensaje en el CRM; (3) pedir horario trae huecos que el CRM registró como
 ofrecidos, elegir uno crea la cita, el lead sube a la siguiente etapa abierta
-y la confirmación dice «Enlace de la reunión» con la sala fija (no «Zoom»);
-(4) Nea sabe a qué hora quedó la cita (bloque `booking` de `/api/bot/context`);
+y la confirmación dice «Enlace de la reunión» con la sala fija (no «Zoom»), y
+Nea no afirma que un día «solo tiene mañana» por lo que no vio;
+(4) Nea sabe a qué hora quedó la cita (bloque `booking` de `/api/bot/context`)
+y no ofrece recordatorios, que el CRM raíz no manda;
 (5) pedir una persona deja el handoff en la conversación y una despedida; (6)
 tres rellenos seguidos cierran con una despedida y `cierre_sin_rumbo` en la
 ficha, el relleno siguiente se calla y una pregunta con contenido reabre; (7)
-con el CRM apagado ~20 s, el relay encolado entrega el mensaje al volver (y
-reporta qué pasó con ese turno); (8) volver a guardar la conexión de WhatsApp
+con el CRM apagado ~20 s y dos mensajes del cliente en medio, el relay entrega
+los dos al volver y el cliente recibe UNA respuesta que contesta los dos (un
+solo turno con la ráfaga completa, sin handoff); (8) volver a guardar la conexión de WhatsApp
 no borra el override de la WABA que fija Nea; (9) `/health` enseña versión,
 modo `estándar` y la cola del relay en 0.
 
@@ -251,7 +259,9 @@ por escenario, latencia por turno con mediana y p95, gasto del modelo),
 `medidor-llm.json` y los logs del CRM y de Nea. Sale con 0 si todo pasa, 1 si
 algún escenario falla y 2 si no se pudo montar el par.
 
-**Cuesta unos centavos de LLM** (~20 turnos contra `z-ai/glm-5.3-flash`). Nea
+**Cuesta unos centavos de LLM** (~20 turnos contra `z-ai/glm-5.3-flash`) y
+tarda unos 5 min; el escenario 7 es el más largo: apaga y vuelve a levantar el
+CRM y espera a que el turno que no lo alcanzó se reintente. Nea
 habla con OpenRouter a través de un medidor local que reenvía los bytes tal
 cual, cuenta los tokens y, antes de pasarse del `--presupuesto`, contesta 402
 sin llamar; tampoco deja pasar otro modelo que el de la prueba.
