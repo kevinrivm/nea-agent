@@ -57,6 +57,7 @@ from app.state import (
     OfferedSlot,
     PendingSend,
     RelayItem,
+    RelayStats,
 )
 from tests.conftest import (
     CRM_CONV_ID,
@@ -272,6 +273,30 @@ async def test_reprogramar_saca_el_relay_de_la_cola_hasta_su_hora(store):
     [item] = await store.due_relays(ahora + timedelta(minutes=6))
     assert item.attempts == 3
     assert item.next_retry_at == ahora + timedelta(minutes=5)
+
+
+async def test_el_estado_del_relay_para_health(store):
+    """Lo que /health enseña: pendientes, edad del más viejo, último error."""
+    assert await store.relay_stats() == RelayStats(0, None, None)
+    fallido = await store.enqueue_relay(b"{}", None)
+    await store.enqueue_relay(b"{}", None)
+    await store.mark_relay_delivered(await store.enqueue_relay(b"{}", None))
+    await store.mark_relay_abandoned(await store.enqueue_relay(b"{}", None))
+    ahora = await _ahora(store)
+    await store.reschedule_relay(fallido, 1, ahora + timedelta(seconds=30))
+    await store.pool.execute(
+        "UPDATE relay_queue SET created_at = now() - interval '5 minutes' WHERE id = $1",
+        fallido,
+    )
+
+    stats = await store.relay_stats()
+
+    assert stats.pendientes == 2  # ni el entregado ni el abandonado
+    assert 300 <= stats.mas_viejo_segundos < 400
+    assert stats.ultimo_error_en is not None
+    assert stats.ultimo_error_en.tzinfo is not None
+    [item] = [i for i in await store.due_relays(ahora + timedelta(minutes=1)) if i.id == fallido]
+    assert item.last_error_at == stats.ultimo_error_en
 
 
 async def test_entregado_o_abandonado_ya_no_se_reintenta(store):
