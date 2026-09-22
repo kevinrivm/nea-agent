@@ -23,6 +23,9 @@ idempotentes al arranque · httpx (CRM y OpenAI) · pytest + respx · Docker
 | Atender a VARIOS negocios a la vez | `app/multiorg.py` |
 | Webhook/firma/dedup/relay | `app/webhook.py` · `app/relay.py` |
 | Coalesce y seguimiento | `app/coalesce.py` · `app/followup.py` |
+| Lo que el lead ve en WhatsApp (Markdown → WhatsApp) | `app/formato.py` |
+| El candado de cierre (conversación sin rumbo) | `app/stall.py` + gate 1.5 de `app/turn.py` |
+| `/health` (versión, commit, modo, relay) | `app/main.py` · `app/version.py` |
 | Tablas | `migrations/*.sql` (idempotentes, aplican al boot) |
 
 ## Reglas duras
@@ -55,6 +58,22 @@ idempotentes al arranque · httpx (CRM y OpenAI) · pytest + respx · Docker
   ambos lados; desviarse un byte da 401 mudo en todo.
 - **Degradación silenciosa**: LLM/CRM fallando jamás rompe el webhook ni manda
   texto roto; tras reintentos → silencio + handoff `error`.
+- **Todo lo que sale a WhatsApp pasa por `app/formato.py`** (turno y
+  seguimiento), y el historial guarda lo convertido: WhatsApp no pinta
+  Markdown, y si el modelo se ve escribiéndolo lo sigue escribiendo. Las URL y
+  los correos no se tocan nunca.
+- **El candado de cierre no es para siempre.** Tras la despedida, el relleno
+  (`es_relleno`) se contesta con silencio durante `STALL_COOLDOWN_HOURS`; un
+  mensaje con contenido reabre en el acto, la fase vuelve a descubrimiento y
+  los contadores cuentan desde `stall_since_message_id`. El cierre se anota en
+  la ficha del CRM (`cierre_sin_rumbo`) y se borra al reabrir.
+- **La identidad va en la forma del CRM**: el teléfono canónico o
+  `bsuid:<id>` (`identidad_del_mensaje`, espejo de `resolveIdentity` del CRM).
+  Con el BSUID pelón, `/api/bot/context` da 404 y el lead nunca recibe
+  respuesta.
+- **`/health` da 200 mientras la base conteste.** La cola del relay es
+  información para el CRM, no motivo para que Docker reinicie el contenedor. Y
+  no lleva secretos ni URLs: el webhook del CRM trae su token en la ruta.
 - **La agenda la manda el CRM.** Vocero registra la oferta contra la
   conversación (por eso `conversationId` va SIEMPRE en `get_availability`) y
   decide qué es reservable. `offered_slots` de Nea es un ESPEJO: sirve para
