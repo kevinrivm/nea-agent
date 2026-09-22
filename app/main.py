@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from contextlib import asynccontextmanager
 from functools import partial
 from pathlib import Path
@@ -44,6 +45,29 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 logger = logging.getLogger("nea.main")
+
+
+class SinTokenDelWebhook(logging.Filter):
+    """Tacha el token del webhook del CRM en los logs de httpx.
+
+    httpx escribe a INFO la URL de cada petición, y la del relay lleva el
+    `META_WEBHOOK_VERIFY_TOKEN` del CRM en la ruta
+    (`/api/webhooks/wa/<token>`): cada mensaje entrante lo dejaba en los logs
+    del contenedor. El resto de la línea (método, ruta, código) se queda,
+    que es lo que sirve para depurar.
+    """
+
+    _TOKEN = re.compile(r"(/api/webhooks/wa/)[^/\s\"?#]+")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        mensaje = record.getMessage()
+        limpio = self._TOKEN.sub(r"\1***", mensaje)
+        if limpio != mensaje:
+            record.msg, record.args = limpio, None
+        return True
+
+
+logging.getLogger("httpx").addFilter(SinTokenDelWebhook())
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 

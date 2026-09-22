@@ -258,7 +258,7 @@ Los NUNCA del chasis en `app/prompt.py` no se relajan sin re-correr esa
 verificación de comportamiento.
 
 ```bash
-pytest -q          # 464 tests: 427 offline + 37 de PgStore, que se saltan sin Postgres
+pytest -q          # 467 tests: 430 offline + 37 de PgStore, que se saltan sin Postgres
 ```
 
 Las de `tests/test_pg_store.py` corren `PgStore` contra un Postgres de verdad
