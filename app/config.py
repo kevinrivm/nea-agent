@@ -58,6 +58,10 @@ class Settings(BaseSettings):
     # CRM (vocero-crm, bot gateway /api/bot/*)
     crm_base_url: str = "http://localhost:3000"
     crm_webhook_url: str = ""  # incluye el segmento del verify token del CRM
+    # Relay al CRM (app/relay.py): la espera entre intentos crece al doble
+    # hasta este tope. Con 15 min, tras una caída larga el mensaje llegaba a
+    # la bandeja minutos después de que el CRM ya había vuelto.
+    relay_backoff_cap_seconds: float = Field(default=60.0, ge=1)
     crm_bot_api_key: str = ""
 
     # Perfil del negocio (capa de persona; ver app/profile.py)

@@ -220,7 +220,12 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 c.agenda_sonda.ttl,
             )
 
-        relay_worker = RelayWorker(c.store, c.settings.crm_webhook_url, c.relay_wake)
+        relay_worker = RelayWorker(
+            c.store,
+            c.settings.crm_webhook_url,
+            c.relay_wake,
+            backoff_cap=c.settings.relay_backoff_cap_seconds,
+        )
         followup_worker = FollowupWorker(c)
         sender_worker = SenderWorker(c)
         workers = [

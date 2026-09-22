@@ -20,7 +20,12 @@ logger = logging.getLogger("nea.relay")
 
 class RelayWorker:
     MAX_AGE = timedelta(hours=24)  # tope duro de reintentos
-    BACKOFF_CAP = 900.0  # 15 min entre intentos, máximo
+    # Tope de la espera entre intentos (RELAY_BACKOFF_CAP_SECONDS). Era de
+    # 15 min: tras una caída larga del CRM, el mensaje llegaba a su bandeja
+    # hasta 15 min DESPUÉS de que el CRM ya había vuelto. Con 60 s, la cola se
+    # vacía como mucho un minuto después, y un intento por minuto por fila no
+    # le pesa a nadie.
+    BACKOFF_CAP = 60.0
     IDLE_SCAN = 5.0  # barrido periódico aunque nadie despierte al worker
 
     def __init__(
@@ -29,11 +34,13 @@ class RelayWorker:
         webhook_url: str,
         wake: asyncio.Event,
         http: httpx.AsyncClient | None = None,
+        backoff_cap: float | None = None,
     ) -> None:
         self._store = store
         self._url = webhook_url
         self._wake = wake
         self._http = http or httpx.AsyncClient(timeout=20.0)
+        self._cap = max(1.0, float(backoff_cap)) if backoff_cap else self.BACKOFF_CAP
 
     async def run(self) -> None:
         while True:
@@ -79,7 +86,7 @@ class RelayWorker:
             await self._store.mark_relay_delivered(item.id)
         else:
             attempts = item.attempts + 1
-            delay = min(2.0**attempts, self.BACKOFF_CAP)
+            delay = min(2.0**attempts, self._cap)
             logger.warning(
                 "relay: item %d falló (intento %d), reintento en %.0f s",
                 item.id,

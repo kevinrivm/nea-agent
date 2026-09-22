@@ -67,8 +67,10 @@ Meta Cloud API ── webhook ──► Nea (este repo)
 
 **El relay es lo que hace que el CRM vea el mensaje.** Cada POST de Meta se
 encola en `relay_queue` (el Postgres de Nea) antes de parsear nada, y el
-`RelayWorker` se lo reenvía crudo al webhook del CRM —firma intacta, backoff
-hasta 24 h—. Si esa cola no sale, el CRM se queda sin los entrantes y sin los
+`RelayWorker` se lo reenvía crudo al webhook del CRM —firma intacta,
+reintentos hasta 24 h con una espera que se dobla hasta
+`RELAY_BACKOFF_CAP_SECONDS` (60 s): al volver el CRM, la cola se vacía en un
+minuto como mucho—. Si esa cola no sale, el CRM se queda sin los entrantes y sin los
 estados de entrega, y a un contacto nuevo Nea no le contesta:
 `/api/bot/context` responde 404 hasta que el relay aterriza. Como solo corre
 contra Postgres, la cubren las pruebas de `tests/test_pg_store.py` (ver
