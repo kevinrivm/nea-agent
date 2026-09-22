@@ -58,6 +58,13 @@ idempotentes al arranque · httpx (CRM y OpenAI) · pytest + respx · Docker
   ambos lados; desviarse un byte da 401 mudo en todo.
 - **Degradación silenciosa**: LLM/CRM fallando jamás rompe el webhook ni manda
   texto roto; tras reintentos → silencio + handoff `error`.
+- **Un turno sin CRM se reintenta, y solo ese.** Si el gate 2 no alcanza al
+  CRM (red, 5xx, o un 404 con el mensaje todavía en el relay), `TurnoSinCrm`
+  reprograma la MISMA ráfaga (`TURN_RETRY_DELAYS`): una por conversación, y
+  lo que el lead escriba mientras tanto se fusiona en ella. Agotadas las
+  esperas, handoff `error` en cuanto el CRM conteste. Nada posterior a leer el
+  contexto se reintenta así: repetir un turno que ya pensó o escribió es
+  contestarle dos veces al lead.
 - **Todo lo que sale a WhatsApp pasa por `app/formato.py`** (turno y
   seguimiento), y el historial guarda lo convertido: WhatsApp no pinta
   Markdown, y si el modelo se ve escribiéndolo lo sigue escribiendo. Las URL y

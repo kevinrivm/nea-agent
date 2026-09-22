@@ -37,6 +37,11 @@ cerebro conversacional.
 - **Degradación silenciosa**: si el LLM o el CRM fallan, el lead jamás recibe
   texto roto — silencio, reintentos con backoff, colas persistentes
   (`relay`, `pending_send`) y handoff de error.
+- **Un CRM caído no se come el turno**: si al empezar un turno el CRM no
+  contesta, la misma ráfaga se reintenta con esperas crecientes
+  (`TURN_RETRY_DELAYS`, 15 s → 5 min, hasta ~8 min) y lo que el lead escriba
+  mientras tanto se contesta en la MISMA respuesta. Si el CRM no vuelve a
+  tiempo, la conversación pasa a un humano en cuanto conteste.
 
 ## La persona es del negocio, no del código
 

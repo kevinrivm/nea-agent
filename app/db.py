@@ -187,6 +187,36 @@ class PgStore:
             next_retry_at,
         )
 
+    async def relay_pendiente_con(self, marcas: list[str]) -> bool:
+        # La cola pendiente es corta (lo demás está entregado o abandonado) y
+        # el índice parcial de 001 la encuentra sin recorrer la tabla.
+        for marca in marcas:
+            if not marca:
+                continue
+            hay = await self.pool.fetchval(
+                """
+                SELECT EXISTS (
+                  SELECT 1 FROM relay_queue
+                  WHERE delivered_at IS NULL AND abandoned_at IS NULL
+                    AND position($1::bytea IN body) > 0
+                )
+                """,
+                marca.encode(),
+            )
+            if hay:
+                return True
+        return False
+
+    async def adelantar_relays(self, now: datetime) -> int:
+        estado = await self.pool.execute(
+            """
+            UPDATE relay_queue SET next_retry_at = $1
+            WHERE delivered_at IS NULL AND abandoned_at IS NULL AND next_retry_at > $1
+            """,
+            now,
+        )
+        return int(str(estado).rsplit(" ", 1)[-1] or 0)
+
     async def relay_stats(self) -> RelayStats:
         # Los dos índices parciales (el de la cola y el de 007) dejan contestar
         # sin recorrer la tabla, que no se purga: /health corre cada 30 s. La

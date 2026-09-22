@@ -315,6 +315,33 @@ async def test_entregado_o_abandonado_ya_no_se_reintenta(store):
     assert marcas[1]["abandoned_at"] is not None
 
 
+async def test_el_relay_sabe_si_aun_guarda_el_payload_de_una_rafaga(store):
+    """Lo que separa «el CRM no conoce a este lead» de «todavía no le llega su
+    mensaje» cuando `/api/bot/context` da 404 (app/turn.py)."""
+    pendiente = await store.enqueue_relay(wa_body(text="hola", wamid="wamid.pg.1"), None)
+    entregado = await store.enqueue_relay(wa_body(text="hola", wamid="wamid.pg.2"), None)
+    await store.mark_relay_delivered(entregado)
+
+    assert await store.relay_pendiente_con(["wamid.pg.1"]) is True
+    assert await store.relay_pendiente_con(["wamid.otro", "wamid.pg.1"]) is True
+    assert await store.relay_pendiente_con(["wamid.pg.2"]) is False  # ya entregado
+    assert await store.relay_pendiente_con([]) is False
+    await store.mark_relay_abandoned(pendiente)
+    assert await store.relay_pendiente_con(["wamid.pg.1"]) is False
+
+
+async def test_adelantar_el_relay_lo_pone_a_tocar_ya(store):
+    ahora = await _ahora(store)
+    en_espera = await store.enqueue_relay(b"{}", None)
+    await store.reschedule_relay(en_espera, 4, ahora + timedelta(minutes=10))
+    await store.mark_relay_delivered(await store.enqueue_relay(b"{}", None))
+
+    assert await store.due_relays(ahora) == []
+    assert await store.adelantar_relays(ahora) == 1  # el entregado no cuenta
+    [item] = await store.due_relays(ahora)
+    assert item.id == en_espera and item.attempts == 4
+
+
 async def test_la_cola_sale_en_orden_y_en_tandas_de_50(store):
     ids = [await store.enqueue_relay(f'{{"n":{n}}}'.encode(), None) for n in range(55)]
     tanda = await store.due_relays(await _ahora(store))

@@ -29,7 +29,9 @@ from app.crm import (
     CrmClient,
     CrmConflict,
     CrmError,
+    CrmUnreachable,
     _404_de_agenda,
+    es_caida,
     _agenda_apagada,
     _booking_conflict,
     _conflict_code,
@@ -268,6 +270,8 @@ class BrainsCrmClient(CrmClient):
         )
         if resp.status_code == 404:
             return None
+        if es_caida(resp.status_code):
+            raise CrmUnreachable(f"context devolvió {resp.status_code}")
         if resp.status_code != 200:
             raise CrmError(f"context devolvió {resp.status_code}")
         data: dict[str, Any] = resp.json()

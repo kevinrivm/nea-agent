@@ -155,3 +155,24 @@ def test_relay_backoff_cap_seconds_sale_del_entorno(monkeypatch):
     assert Settings(_env_file=None).relay_backoff_cap_seconds == 60
     monkeypatch.setenv("RELAY_BACKOFF_CAP_SECONDS", "30")
     assert Settings(_env_file=None).relay_backoff_cap_seconds == 30
+
+
+async def test_al_entregar_lo_que_antes_fallo_avisa_que_el_crm_volvio(ctx, respx_mock):
+    """Es lo que despierta a los turnos que esperaban al CRM (app/turn.py)."""
+    respx_mock.post(CRM_WEBHOOK_URL).mock(
+        side_effect=[httpx.Response(200), httpx.Response(503), httpx.Response(200)]
+    )
+    avisos: list[int] = []
+    worker = RelayWorker(
+        ctx.store, CRM_WEBHOOK_URL, asyncio.Event(), al_volver=lambda: avisos.append(1)
+    )
+    await ctx.store.enqueue_relay(b"{}", None)
+    await worker.process_due(now=utcnow())
+    assert avisos == []  # a la primera: el CRM nunca se fue
+    await ctx.store.enqueue_relay(b"{}", None)
+    t1 = utcnow()
+    await worker.process_due(now=t1)  # 503
+    assert avisos == []
+    await worker.process_due(now=t1 + timedelta(seconds=10))  # entrega
+    assert avisos == [1]
+    await worker.aclose()

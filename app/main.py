@@ -36,7 +36,7 @@ from app.profile import ProfileProvider
 from app.relay import RelayWorker
 from app.sender import SenderWorker
 from app.state import AppContext
-from app.turn import handle_flush
+from app.turn import cancelar_pendientes, handle_flush, reanudar_pendientes
 from app.version import commit, version
 from app.webhook import router as webhook_router
 
@@ -225,6 +225,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             c.settings.crm_webhook_url,
             c.relay_wake,
             backoff_cap=c.settings.relay_backoff_cap_seconds,
+            # El CRM volvió: los turnos que lo esperaban no aguardan su espera.
+            al_volver=partial(reanudar_pendientes, c),
         )
         followup_worker = FollowupWorker(c)
         sender_worker = SenderWorker(c)
@@ -257,6 +259,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             await relay_worker.aclose()
             if c.coalescer is not None:
                 await c.coalescer.aclose()
+            await cancelar_pendientes(c)
             if own_resources:
                 await c.crm.aclose()
                 if c.registro is not None:

@@ -232,6 +232,13 @@ class Store(Protocol):
         ...
 
     async def relay_stats(self) -> RelayStats: ...
+    # ¿Sigue en la cola, sin entregar, el payload que trae alguno de estos
+    # wamids? Es lo que separa «el CRM no conoce a este lead» de «el CRM
+    # todavía no recibe su mensaje» cuando `/api/bot/context` da 404.
+    async def relay_pendiente_con(self, marcas: list[str]) -> bool: ...
+    # Lo pendiente vuelve a tocar YA (el CRM contestó: ya no hay por qué
+    # esperar el backoff). Devuelve cuántas filas adelantó.
+    async def adelantar_relays(self, now: datetime) -> int: ...
     async def ping(self) -> None: ...
     async def aclose(self) -> None: ...
 
@@ -287,6 +294,23 @@ class MemoryStore:
         item.attempts = attempts
         item.next_retry_at = next_retry_at
         item.last_error_at = utcnow()
+
+    async def relay_pendiente_con(self, marcas: list[str]) -> bool:
+        claves = [m.encode() for m in marcas if m]
+        return any(
+            clave in r.body
+            for r in self.relays.values()
+            if r.delivered_at is None and r.abandoned_at is None
+            for clave in claves
+        )
+
+    async def adelantar_relays(self, now: datetime) -> int:
+        n = 0
+        for r in self.relays.values():
+            if r.delivered_at is None and r.abandoned_at is None and r.next_retry_at > now:
+                r.next_retry_at = now
+                n += 1
+        return n
 
     async def relay_stats(self) -> RelayStats:
         pendientes = [
@@ -489,3 +513,8 @@ class AppContext:
     turn_locks: dict[str, asyncio.Lock] = field(default_factory=dict)
     # Cuántos turnos tienen tomado (o esperan) el candado de esa identidad.
     turn_lock_users: dict[str, int] = field(default_factory=dict)
+    # Ráfagas que no alcanzaron al CRM y esperan su reintento (app/turn.py),
+    # por (organización, identidad): a lo más UNA por conversación, y el
+    # mensaje nuevo que llega mientras tanto se la lleva consigo. Se comparte
+    # con los contextos por organización (`replace` copia la referencia).
+    turnos_pendientes: dict[tuple[str, str], Any] = field(default_factory=dict)

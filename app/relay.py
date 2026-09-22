@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timedelta
+from typing import Any, Callable
 
 import httpx
 
@@ -35,12 +36,16 @@ class RelayWorker:
         wake: asyncio.Event,
         http: httpx.AsyncClient | None = None,
         backoff_cap: float | None = None,
+        al_volver: Callable[[], Any] | None = None,
     ) -> None:
         self._store = store
         self._url = webhook_url
         self._wake = wake
         self._http = http or httpx.AsyncClient(timeout=20.0)
         self._cap = max(1.0, float(backoff_cap)) if backoff_cap else self.BACKOFF_CAP
+        # Se llama al entregar algo que antes falló: el CRM volvió. main.py la
+        # conecta con los turnos que esperaban al CRM (app/turn.py).
+        self._al_volver = al_volver
 
     async def run(self) -> None:
         while True:
@@ -84,6 +89,11 @@ class RelayWorker:
             return
         if await self._deliver(item):
             await self._store.mark_relay_delivered(item.id)
+            if item.attempts > 0 and self._al_volver is not None:
+                try:
+                    self._al_volver()
+                except Exception:
+                    logger.exception("relay: el aviso de que el CRM volvió falló")
         else:
             attempts = item.attempts + 1
             delay = min(2.0**attempts, self._cap)

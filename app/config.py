@@ -25,6 +25,10 @@ def canonical_identity(wa_id: str) -> str:
     return s
 
 
+# Tope de la suma de TURN_RETRY_DELAYS: pasado ese tiempo una respuesta ya no
+# contesta nada, y el turno se entrega a un humano (app/turn.py).
+TURN_RETRY_MAX_TOTAL_SECONDS = 600.0
+
 # Un BSUID tal como lo manda Meta: país, punto y el identificador
 # (`US.13491208655302741918`). El CRM lo guarda como `bsuid:<id>`.
 _BSUID_PELON = re.compile(r"^[A-Za-z]{2}\.[A-Za-z0-9]+$")
@@ -187,6 +191,10 @@ class Settings(BaseSettings):
     stall_cooldown_hours: float = Field(default=24.0, ge=0)
     # "Escribiendo…" casi inmediato al recibir un mensaje (antes del coalesce).
     typing_delay_seconds: float = 0.5
+    # Turno sin CRM (app/turn.py): si el CRM no contesta (red o 5xx), la misma
+    # ráfaga se vuelve a intentar tras estas esperas, en segundos. CSV; la
+    # suma se corta a los 10 min. Vacío = no se reintenta.
+    turn_retry_delays: str = "15,45,120,300"
 
     # ── Modo cloud (Vocero multitenant) ───────────────────────────────
     #
@@ -266,6 +274,29 @@ class Settings(BaseSettings):
         return frozenset(
             _identidad_de_lista(part) for part in csv.split(",") if part.strip()
         )
+
+    @property
+    def turn_retry_schedule(self) -> tuple[float, ...]:
+        """Las esperas entre reintentos de un turno que no alcanzó al CRM.
+
+        Tolerante como el resto de la configuración: lo que no es un número
+        positivo se ignora, y la suma no pasa de TURN_RETRY_MAX_TOTAL_SECONDS:
+        una respuesta que llega a los diez minutos ya no contesta nada.
+        """
+        esperas: list[float] = []
+        total = 0.0
+        for parte in self.turn_retry_delays.split(","):
+            try:
+                espera = float(parte.strip())
+            except ValueError:
+                continue
+            if espera <= 0:
+                continue
+            if total + espera > TURN_RETRY_MAX_TOTAL_SECONDS:
+                break
+            esperas.append(espera)
+            total += espera
+        return tuple(esperas)
 
     @property
     def allowed_identities(self) -> frozenset[str]:
