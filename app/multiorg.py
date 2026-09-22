@@ -181,6 +181,9 @@ class RegistroDeOrganizaciones:
                 # llega al proveedor igual que en mono-organizacion.
                 reasoning_effort=por_defecto.llm_reasoning_effort,
                 provider_sort=por_defecto.llm_provider_sort,
+                # Y el tope por intento, tambien de esta Nea: el CRM reenvia,
+                # pero quien espera al proveedor colgado es el turno de aqui.
+                timeout=por_defecto.llm_timeout_seconds,
             )
             self._llms[clave] = cliente
         return cliente

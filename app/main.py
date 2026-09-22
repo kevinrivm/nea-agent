@@ -107,6 +107,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                         base_url=settings.llm_base_url or None,
                         reasoning_effort=settings.llm_reasoning_effort,
                         provider_sort=settings.llm_provider_sort,
+                        timeout=settings.llm_timeout_seconds,
                     )
                 ),
                 # En multi-organización el perfil es de cada negocio y lo

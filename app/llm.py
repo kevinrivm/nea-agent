@@ -5,6 +5,8 @@ Gotchas del brief que se honran aquí:
 - Respuesta vacía de verdad (sin content ni tool_calls) o excepción → reintento
   con backoff (2 reintentos). Agotado → `LlmExhausted` y el turno degrada en
   silencio + handoff error (Constitución IV).
+- Cada intento tiene tope (`LLM_TIMEOUT_SECONDS`) y el SDK no reintenta por su
+  cuenta: los reintentos son estos, no se multiplican.
 - Los `arguments` de las tools pueden venir malformados: JSON inválido → {}.
 """
 from __future__ import annotations
@@ -73,6 +75,10 @@ def _formato_de_audio(mime: str) -> str:
     return _FORMATOS.get((mime or "").split(";")[0].strip().lower(), "ogg")
 
 
+# Segundos por intento, el default de LLM_TIMEOUT_SECONDS (ver config.py).
+DEFAULT_TIMEOUT = 45.0
+
+
 class OpenAiLlm:
     RETRIES = 2  # además del intento inicial
 
@@ -85,6 +91,7 @@ class OpenAiLlm:
         default_headers: dict[str, str] | None = None,
         reasoning_effort: str = "",
         provider_sort: str = "",
+        timeout: float = DEFAULT_TIMEOUT,
     ) -> None:
         # base_url ≠ None → proveedor OpenAI-compatible (p. ej. OpenRouter,
         # para el bench de modelos del 002). Ojo: la transcripción de audio
@@ -93,8 +100,20 @@ class OpenAiLlm:
         # `default_headers` lo usa el modo multi-organización: cuando quien
         # piensa es el CRM (y no OpenRouter directo), hay que decirle de qué
         # organización es cada llamada.
+        #
+        # `timeout` y `max_retries=0` van juntos. Por defecto el SDK espera
+        # hasta 600 s por petición y reintenta dos veces más POR SU CUENTA,
+        # así que cada intento de abajo eran hasta tres peticiones de diez
+        # minutos. Los reintentos son de Nea (RETRIES + backoff en `complete`,
+        # dos intentos en `transcribe`): un timeout es una excepción más, cae
+        # en ese mismo camino y, agotado, termina en `LlmExhausted` → silencio
+        # + handoff `error`, como cualquier otro fallo del proveedor.
         self._client = AsyncOpenAI(
-            api_key=api_key, base_url=base_url, default_headers=default_headers
+            api_key=api_key,
+            base_url=base_url,
+            default_headers=default_headers,
+            timeout=timeout,
+            max_retries=0,
         )
         self._model = model
         self._transcribe_model = transcribe_model
