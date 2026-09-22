@@ -31,3 +31,47 @@ jobs:
 
       - name: Pruebas
         run: python -m pytest -q
+
+  # PgStore contra un Postgres de verdad (tests/test_pg_store.py).
+  #
+  # El job de arriba corre todo con MemoryStore, que devuelve el objeto que
+  # guardó: ahí no hay SQL ni mapeo de filas que equivocar. Así pasó en verde
+  # 95549c8, que leía columnas que relay_queue no tiene y dejó el relay del
+  # modo de siempre muerto: sin entrantes en la bandeja del CRM, sin estados de
+  # entrega y sin respuesta a contactos nuevos.
+  #
+  # Con TEST_DATABASE_URL puesta esas pruebas NO se saltan: si el servicio no
+  # levanta, el job falla en vez de pasar sin haber probado nada.
+  postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: nea
+          POSTGRES_PASSWORD: nea
+          POSTGRES_DB: nea
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U nea -d nea"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      # Servidor desechable del job: cada corrida crea su propia base y la
+      # borra al terminar.
+      TEST_DATABASE_URL: postgresql://nea:nea@localhost:5432/nea
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Instalar dependencias
+        run: pip install -r requirements-dev.txt
+
+      - name: Pruebas contra Postgres
+        run: python -m pytest -q -rs tests/test_pg_store.py
