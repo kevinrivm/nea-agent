@@ -78,13 +78,57 @@ async def test_book_acepta_slot_ofrecido_epoch_exacto(runtime_y_ctx, respx_mock)
     assert await ctx.store.get_offered_slots(conv.id) == []
 
 
-async def test_booking_confirmation_includes_authoritative_zoom_link(runtime_y_ctx):
+async def test_booking_confirmation_includes_authoritative_meeting_link(runtime_y_ctx):
     runtime, _, _ = runtime_y_ctx
     runtime.booking_confirmation = {"label":"viernes 18 de septiembre, 10:00 am","meeting_url":"https://zoom.us/j/123","link_pending":False,"reminder_consent":True}
     reply=runtime.finalize_reply("Te mandaré el enlace después")
-    assert "https://zoom.us/j/123" in reply
+    assert "Enlace de la reunión: https://zoom.us/j/123" in reply
     assert "después" not in reply
     assert "recordatorios" in reply
+
+
+@pytest.mark.parametrize(
+    "enlace",
+    ["https://meet.google.com/abc-defg-hij", "https://sala.negocio.test/fija", "https://zoom.us/j/1"],
+)
+async def test_la_confirmacion_no_le_pone_proveedor_al_enlace(runtime_y_ctx, enlace):
+    """Ningún CRM dice de qué proveedor es el enlace (Zoom, Meet o la sala
+    fija del negocio): llamarlo "de Zoom" le mentía a quien recibió un Meet."""
+    runtime, _, _ = runtime_y_ctx
+    runtime.booking_confirmation = {"label": "lunes 20 de julio, 10:00 am", "meeting_url": enlace, "link_pending": False, "reminder_consent": False}
+    reply = runtime.finalize_reply("texto del modelo")
+    assert f"Enlace de la reunión: {enlace}" in reply
+    assert "Zoom" not in reply and "Meet" not in reply
+    assert "recordatorios" not in reply
+
+
+async def test_reservar_con_un_meet_confirma_con_el_enlace_neutro(runtime_y_ctx, respx_mock):
+    """La cadena real: lo que devuelve el CRM → lo que lee el lead."""
+    runtime, _, _ = runtime_y_ctx
+    respx_mock.post(f"{CRM_URL}/api/bot/bookings").mock(
+        return_value=httpx.Response(
+            201,
+            json={"bookingId": "bk_1", "meetingLink": "https://meet.google.com/abc", "linkPending": False, "label": "lun 20 jul, 10:00"},
+        )
+    )
+    respx_mock.put(f"{CRM_URL}/api/bot/ficha").mock(return_value=httpx.Response(200, json={}))
+    result = await runtime.execute(
+        "book_session",
+        {"start_utc": SLOT_ISO, "dia_confirmado": "sí, el lunes", "recordatorios_aceptados": False},
+    )
+    assert result["ok"] is True
+    assert runtime.finalize_reply("¡Listo!") == (
+        "Listo, tu cita quedó confirmada para lunes 20 de julio, 10:00 am.\n\n"
+        "Enlace de la reunión: https://meet.google.com/abc"
+    )
+
+
+async def test_la_confirmacion_con_enlace_pendiente_no_promete_uno(runtime_y_ctx):
+    runtime, _, _ = runtime_y_ctx
+    runtime.booking_confirmation = {"label": "lunes 20 de julio, 10:00 am", "meeting_url": None, "link_pending": True, "reminder_consent": False}
+    reply = runtime.finalize_reply("texto del modelo")
+    assert "Enlace de" not in reply
+    assert "te llegará por aquí en un momento" in reply
 
 
 async def test_book_slot_taken_ofrece_alternativas_frescas(runtime_y_ctx, respx_mock):

@@ -678,14 +678,23 @@ class ToolRuntime:
         }
 
     def finalize_reply(self, text: str) -> str:
-        """Booking confirmation is authoritative, not left to model wording."""
+        """Booking confirmation is authoritative, not left to model wording.
+
+        El enlace se nombra neutro: la reunión la entrega un conector (Zoom,
+        Google Meet o la sala fija del negocio) y ninguno de los dos CRM dice
+        cuál — `/api/bot/bookings` manda `meetingLink` a secas y
+        `/api/brains/agenda/book` tampoco trae el proveedor del enlace (los
+        `deliveryStates` del contrato v2 son la sincronización con calendario
+        y Zoom, no de dónde es el enlace). Decir "Zoom" a quien le llegó un
+        Meet es justo la clase de dato inventado que el agente no dice.
+        """
         data = self.booking_confirmation
         if not data:
             return text
         label = data.get("label") or "el horario acordado"
         parts = [f"Listo, tu cita quedó confirmada para {label}."]
         if data.get("meeting_url"):
-            parts.append(f"Enlace de Zoom: {data['meeting_url']}")
+            parts.append(f"Enlace de la reunión: {data['meeting_url']}")
         elif data.get("link_pending"):
             parts.append("El enlace de la videollamada te llegará por aquí en un momento.")
         if data.get("reminder_consent"):
