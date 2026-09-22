@@ -190,6 +190,65 @@ versión corre, pasa los build args `NEA_VERSION` y `SOURCE_COMMIT`
   desde una línea tester vía [Evolution API](https://doc.evolution-api.com/),
   con pausas mínimas, tope de mensajes y kill-switch de archivo.
 
+### Prueba de punta a punta contra Vocero raíz
+
+`scripts/e2e_contra_raiz.py` monta el par como se instala en modo estándar
+(Meta → Nea → relay al CRM; Nea contesta por `/api/bot/*`) y hace de Meta y
+de cliente: manda webhooks con la forma real de la Cloud API, firmados con
+`META_APP_SECRET`, y comprueba lo observable en la API del CRM, su base y el
+outbox del wa-mock. Nada sale a Meta ni a WhatsApp: el CRM envía por su
+wa-mock.
+
+**Requisitos**: un checkout de [vocero-crm](https://github.com/kevinrivm/vocero-crm)
+con `pnpm install` hecho (el guion lo arranca con `next dev` y le aplica las
+migraciones), Node en el `PATH`, este repo con sus dependencias, y un Postgres
+con dos bases (una para el CRM y otra para Nea; vacías o de una corrida
+anterior, las dos sirven). El guion levanta y apaga el CRM y Nea; el Postgres
+no.
+
+**Variables** (del entorno o de uno o más `--env-file`; de esos archivos solo
+se leen estas tres, así que puede ser el vault de operación):
+
+| Variable | Qué es |
+|---|---|
+| `LLM_API_KEY` | Llave de OpenRouter. Nunca va por argv ni se imprime |
+| `CRM_DATABASE_URL` | Base del CRM |
+| `NEA_DATABASE_URL` | Base de Nea |
+
+Lo demás (`BOT_API_KEY`, `META_APP_SECRET`, tokens del webhook, secretos de
+sesión y de cifrado) lo inventa cada corrida.
+
+```bash
+python scripts/e2e_contra_raiz.py --crm-dir ../vocero-crm \
+  --env-file ../.env --env-file ./runtime-e2e.env --out ./e2e-salida
+# --escenarios 1-5,9 para correr solo algunos · --presupuesto 0.50 (USD)
+```
+
+**Qué comprueba**, con un cliente nuevo por historia: (1) el primer mensaje
+llega a la bandeja del CRM en segundos y la respuesta de Nea sale por el
+wa-mock sin Markdown; (2) `delivered` y `read` de Meta avanzan el estado del
+mensaje en el CRM; (3) pedir horario trae huecos que el CRM registró como
+ofrecidos, elegir uno crea la cita, el lead sube a la siguiente etapa abierta
+y la confirmación dice «Enlace de la reunión» con la sala fija (no «Zoom»);
+(4) Nea sabe a qué hora quedó la cita (bloque `booking` de `/api/bot/context`);
+(5) pedir una persona deja el handoff en la conversación y una despedida; (6)
+tres rellenos seguidos cierran con una despedida y `cierre_sin_rumbo` en la
+ficha, el relleno siguiente se calla y una pregunta con contenido reabre; (7)
+con el CRM apagado ~20 s, el relay encolado entrega el mensaje al volver (y
+reporta qué pasó con ese turno); (8) volver a guardar la conexión de WhatsApp
+no borra el override de la WABA que fija Nea; (9) `/health` enseña versión,
+modo `estándar` y la cola del relay en 0.
+
+En `--out` quedan una transcripción por cliente, `resultado.json` (evidencia
+por escenario, latencia por turno con mediana y p95, gasto del modelo),
+`medidor-llm.json` y los logs del CRM y de Nea. Sale con 0 si todo pasa, 1 si
+algún escenario falla y 2 si no se pudo montar el par.
+
+**Cuesta unos centavos de LLM** (~20 turnos contra `z-ai/glm-5.3-flash`). Nea
+habla con OpenRouter a través de un medidor local que reenvía los bytes tal
+cual, cuenta los tokens y, antes de pasarse del `--presupuesto`, contesta 402
+sin llamar; tampoco deja pasar otro modelo que el de la prueba.
+
 ## Definición de Hecho
 
 Los tests unitarios (`pytest`, sin red ni Postgres) son el piso, no el techo.
