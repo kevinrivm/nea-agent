@@ -144,6 +144,9 @@ manda los webhooks a Nea, Nea le releva cada uno al CRM y conversa por
 que el lead recibe sale por `POST {CRM}/api/bot/messages`**, y es el CRM quien
 lo envía y lo deja en la bandeja.
 
+Qué cambia en cada versión y cómo actualizar una Nea que ya corre:
+[`CHANGELOG.md`](CHANGELOG.md).
+
 ### 1. Lo que pone el CRM
 
 En las variables de Vocero raíz:
