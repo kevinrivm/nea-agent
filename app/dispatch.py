@@ -168,8 +168,12 @@ async def _procesar(ctx: AppContext, payload: dict[str, Any]) -> None:
     if callable(registrar_envelope):
         registrar_envelope(conversation_id, payload)
 
-    # Directo al turno, sin coalescer: el CRM ya agrupó la ráfaga.
-    await handle_flush(ctx_turno, identity, mensajes)
+    # Directo al turno, sin coalescer: el CRM ya agrupó la ráfaga. Con la
+    # conversación que el CRM despachó, para que la red de seguridad del turno
+    # sepa a quién pasársela si revienta antes de leer el contexto.
+    await handle_flush(
+        ctx_turno, identity, mensajes, crm_conversation_id=conversation_id
+    )
 
 
 async def _contexto_multiorg(
