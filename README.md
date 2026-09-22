@@ -209,6 +209,11 @@ docker build --build-arg NEA_VERSION=1.0.0 \
   --build-arg SOURCE_COMMIT=$(git rev-parse HEAD) -t nea-agent:1.0.0 .
 ```
 
+O deja que la construya GitHub: con Actions encendido en tu fork, un tag
+`vX.Y.Z` publica `ghcr.io/<tu-usuario>/nea-agent:X.Y.Z`. GitHub crea ese
+paquete como privado: hazlo público (Package settings → Change visibility) o
+dale a tu servidor credenciales del registro, o Coolify no podrá descargarlo.
+
 ### 3. Variables mínimas
 
 | Variable | Qué va | Si falta |
