@@ -35,6 +35,7 @@ COLUMNAS_DE_CONVERSACION = frozenset(
         "followup_sent",
         "last_inbound_at",
         "stalled_at",
+        "stall_since_message_id",
     }
 )
 
@@ -62,8 +63,11 @@ class Conversation:
     followup_sent: bool = False
     last_inbound_at: datetime | None = None
     # Puesta cuando el agente cierra por conversación sin rumbo: mientras
-    # viva, el turno guarda silencio (ver app/stall.py).
+    # viva, el relleno se contesta con silencio (ver app/stall.py).
     stalled_at: datetime | None = None
+    # El candado cuenta solo los mensajes con id mayor a este: se mueve al
+    # reabrir, para que el hilo viejo no vuelva a disparar el cierre.
+    stall_since_message_id: int = 0
 
 
 @dataclass

@@ -38,6 +38,7 @@ def _conv_from_row(row: asyncpg.Record) -> Conversation:
         followup_sent=row["followup_sent"],
         last_inbound_at=row["last_inbound_at"],
         stalled_at=row["stalled_at"],
+        stall_since_message_id=row["stall_since_message_id"],
         organization_id=row["organization_id"],
         organization_slug=row["organization_slug"],
     )

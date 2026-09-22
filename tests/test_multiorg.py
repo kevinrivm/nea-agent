@@ -402,6 +402,7 @@ def test_el_mapeo_de_conversacion_no_se_deja_ninguna_columna():
         "followup_sent": False,
         "last_inbound_at": ahora,
         "stalled_at": None,
+        "stall_since_message_id": 7,
     }
     conv = _conv_from_row(fila)
 

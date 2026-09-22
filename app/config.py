@@ -155,6 +155,14 @@ class Settings(BaseSettings):
     tester_wa_ids: str = ""  # CSV; vacía = responde a todos (Constitución V)
     coalesce_seconds: float = 4.0
     followup_hours: float = 4.0
+    # Candado de cierre (app/stall.py): cuándo Nea se despide de una
+    # conversación que no va a ningún lado y cuánto calla después. Los
+    # valores por defecto son los de siempre; 0 apaga ese disparador.
+    stall_max_turns: int = Field(default=14, ge=0)
+    stall_filler_streak: int = Field(default=3, ge=0)
+    # Tras el cierre, el relleno ("gracias", "ok", un emoji) se contesta con
+    # silencio durante este tiempo; un mensaje con contenido reabre siempre.
+    stall_cooldown_hours: float = Field(default=24.0, ge=0)
     # "Escribiendo…" casi inmediato al recibir un mensaje (antes del coalesce).
     typing_delay_seconds: float = 0.5
 

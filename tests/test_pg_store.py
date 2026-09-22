@@ -541,6 +541,7 @@ async def test_update_conversation_guarda_cada_columna(store):
         followup_sent=True,
         last_inbound_at=t - timedelta(hours=1),
         stalled_at=t + timedelta(minutes=1),
+        stall_since_message_id=42,
     )
     leida = await store.get_or_create_conversation(IDENTITY)
     assert leida.crm_conversation_id == CRM_CONV_ID
@@ -550,6 +551,7 @@ async def test_update_conversation_guarda_cada_columna(store):
     assert leida.followup_sent is True
     assert leida.last_inbound_at == t - timedelta(hours=1)
     assert leida.stalled_at == t + timedelta(minutes=1)
+    assert leida.stall_since_message_id == 42
 
     # Y se pueden volver a vaciar (así reabre el turno una conversación).
     await store.update_conversation(conv.id, stalled_at=None, followup_due_at=None)

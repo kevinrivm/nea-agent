@@ -23,7 +23,13 @@ from app.crm import CrmConflict, CrmError
 from app.formato import a_whatsapp
 from app.hostility import ALERT as HOSTILITY_ALERT, hostile_streak
 from app.llm import LlmExhausted
-from app.stall import ALERTA as STALL_ALERT, racha_vacia, sin_rumbo
+from app.stall import (
+    ALERTA as STALL_ALERT,
+    FICHA_CIERRE,
+    racha_vacia,
+    sin_rumbo,
+    trae_contenido,
+)
 from app.profile import resolve_profile
 from app.prompt import build_system_prompt
 from app.state import AppContext, InboundMessage, utcnow
@@ -32,10 +38,8 @@ from app.tools import ToolRuntime, tool_schemas
 logger = logging.getLogger("nea.turn")
 
 MAX_TOOL_ROUNDS = 5
-# Cuánto calla el agente tras cerrar por falta de rumbo. Un lead que vuelve al
-# día siguiente merece respuesta; el que insiste en el mismo hilo muerto, no.
-STALL_COOLDOWN = timedelta(hours=24)
-# Mensajes que se traen para contar el hilo del lead (el LLM ve menos).
+# Mensajes que se traen, como mínimo, para contar el hilo del lead (el LLM ve
+# menos). Si STALL_MAX_TURNS pide contar más, se traen más.
 STALL_LOOKBACK = 40
 CONTEXT_ATTEMPTS = 3  # el relay puede tardar un instante en aterrizar en el CRM
 
@@ -213,21 +217,29 @@ async def run_turn(
         return
 
     # --- Gate 1.5: conversación ya cerrada por no ir a ningún lado --------
-    # El agente ya se despidió amable; seguir contestando es perseguir. Se
-    # reabre sola tras el enfriamiento (un lead que vuelve al día siguiente
-    # merece respuesta) o cuando el dueño reactiva la IA desde el CRM.
+    # El agente ya se despidió amable; contestarle el relleno ("gracias",
+    # "ok", un emoji) sería perseguir. Pero el cierre no es para siempre: un
+    # mensaje con contenido la reabre en el acto —«¿cuánto cuesta?» merece
+    # respuesta aunque llegue a los diez minutos— y, pasado el enfriamiento
+    # (STALL_COOLDOWN_HOURS), la reabre cualquiera.
     if conv.stalled_at is not None:
-        if utcnow() - conv.stalled_at < STALL_COOLDOWN:
+        enfriando = utcnow() - conv.stalled_at < timedelta(
+            hours=settings.stall_cooldown_hours
+        )
+        if enfriando and not any(trae_contenido(m.type, m.text) for m in inbound):
             logger.info(
-                "turno %s: conversación cerrada por falta de rumbo — silencio",
+                "turno %s: relleno tras el cierre por falta de rumbo — silencio",
                 identity,
             )
             return
         logger.info(
-            "turno %s: el lead volvió tras el enfriamiento — reabro", identity
+            "turno %s: %s — reabro",
+            identity,
+            "el lead escribió algo con contenido"
+            if enfriando
+            else "el lead volvió tras el enfriamiento",
         )
-        await ctx.store.update_conversation(conv.id, stalled_at=None)
-        conv.stalled_at = None
+        await _reabrir(ctx, conv, identity)
 
     # --- Gate 2: contexto del CRM (aiEnabled, ventana) --------------------
     context = await _fetch_context(ctx, identity)
@@ -305,7 +317,9 @@ async def run_turn(
     )
     # Se traen más mensajes de los que ve el LLM: el candado de cierre cuenta
     # el hilo COMPLETO del lead, no solo la ventana de contexto.
-    recientes = await ctx.store.recent_messages(conv.id, STALL_LOOKBACK)
+    recientes = await ctx.store.recent_messages(
+        conv.id, max(STALL_LOOKBACK, 3 * settings.stall_max_turns)
+    )
     history = recientes[-settings.history_window :]
     messages: list[dict[str, Any]] = [{"role": "system", "content": system}] + [
         {"role": m.role, "content": m.content} for m in history
@@ -318,9 +332,19 @@ async def run_turn(
         messages.append({"role": "system", "content": HOSTILITY_ALERT})
     # Candado de cierre: conversación que no va a ningún lado. Se despide con
     # UNA línea cálida en este turno y después calla (gate 1.5). El conteo es
-    # determinista aquí; el LLM solo pone la redacción.
-    del_lead = [m.content for m in recientes if m.role == "user"]
-    cerrar_sin_rumbo = streak < 3 and sin_rumbo(del_lead, conv.phase)
+    # determinista aquí; el LLM solo pone la redacción. Cuenta solo lo de
+    # después de la última reapertura: el hilo viejo ya tuvo su despedida.
+    del_lead = [
+        m.content
+        for m in recientes
+        if m.role == "user" and m.id > conv.stall_since_message_id
+    ]
+    cerrar_sin_rumbo = streak < 3 and sin_rumbo(
+        del_lead,
+        conv.phase,
+        racha=settings.stall_filler_streak,
+        max_mensajes=settings.stall_max_turns,
+    )
     if cerrar_sin_rumbo:
         logger.info(
             "turno %s: sin rumbo (%d mensajes del lead, racha vacía %d) — cierro",
@@ -396,10 +420,11 @@ async def run_turn(
 
     # --- Fase + seguimiento -----------------------------------------------
     updates: dict[str, Any] = {"greeted": True}
+    cerrada_en = utcnow()
     if cerrar_sin_rumbo:
         # Se marca aunque el envío haya fallado: la decisión de cerrar ya se
         # tomó y no queremos que el próximo mensaje reabra el ciclo.
-        updates["stalled_at"] = utcnow()
+        updates["stalled_at"] = cerrada_en
         updates["phase"] = "cerrada"
         updates["followup_due_at"] = None
     elif runtime.handoff_reason is not None or runtime.booked or runtime.routed_out:
@@ -413,6 +438,58 @@ async def run_turn(
                 hours=settings.followup_hours
             )
     await ctx.store.update_conversation(conv.id, **updates)
+    if cerrar_sin_rumbo:
+        # A la vista del dueño: en el panel del contacto sale «Cierre sin
+        # rumbo» con la hora local. Sin esto, desde el CRM solo se veía a una
+        # Nea que de pronto dejó de contestar.
+        await _anotar_cierre(
+            ctx,
+            str(crm_conv_id),
+            cerrada_en.astimezone(_agent_tz(settings)).isoformat(timespec="minutes"),
+            identity,
+        )
+
+
+async def _reabrir(ctx: AppContext, conv: Any, identity: str) -> None:
+    """Saca la conversación del candado de cierre, con los contadores en cero.
+
+    La fase vuelve a descubrimiento: el cierre la deja en `cerrada`, y con
+    ella el candado no se volvía a disparar nunca (ni había seguimiento). Los
+    contadores no se borran: se mueve la marca desde la que cuentan (006) al
+    último mensaje de la conversación, y el hilo viejo deja de contar.
+    """
+    ultimos = await ctx.store.recent_messages(conv.id, 1)
+    desde = ultimos[-1].id if ultimos else 0
+    await ctx.store.update_conversation(
+        conv.id,
+        stalled_at=None,
+        phase="descubrimiento",
+        stall_since_message_id=desde,
+    )
+    conv.stalled_at = None
+    conv.phase = "descubrimiento"
+    conv.stall_since_message_id = desde
+    if conv.crm_conversation_id:
+        await _anotar_cierre(ctx, str(conv.crm_conversation_id), None, identity)
+
+
+async def _anotar_cierre(
+    ctx: AppContext, crm_conv_id: str, valor: str | None, identity: str
+) -> None:
+    """Escribe (o borra, con `None`) el cierre en la ficha del CRM.
+
+    Merge del CRM: la clave va sola y `null` la borra sin tocar el resto de la
+    ficha. Best-effort absoluto: el candado funciona igual sin el CRM.
+    """
+    try:
+        await ctx.crm.put_ficha(crm_conv_id, {FICHA_CIERRE: valor})
+    except Exception as exc:
+        logger.warning(
+            "turno %s: no pude %s el cierre en la ficha (%s)",
+            identity,
+            "anotar" if valor else "borrar",
+            exc,
+        )
 
 
 async def _run_reset(ctx: AppContext, conv: Any, identity: str) -> None:
