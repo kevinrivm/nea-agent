@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from app.crm import (
     AgendaUnavailable,
@@ -127,16 +128,8 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                             "en vez de reservar."
                         ),
                     },
-                    "recordatorios_aceptados": {
-                        "type": "boolean",
-                        "description": (
-                            "true SOLO si el lead autorizó explícitamente recibir "
-                            "recordatorios de ESTA cita. Reservar o confirmar el "
-                            "horario no implica permiso. Si no lo dijo o lo rechazó, false."
-                        ),
-                    },
                 },
-                "required": ["start_utc", "dia_confirmado", "recordatorios_aceptados"],
+                "required": ["start_utc", "dia_confirmado"],
             },
         },
     },
@@ -200,6 +193,20 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
 ]
 
 
+# Recordatorios de la cita: SOLO los manda la agenda v2 de Vocero Cloud. El
+# CRM raíz no tiene recordatorios, y con este campo obligatorio en su
+# book_session el modelo, para llenarlo, le preguntaba al lead «¿te mando un
+# recordatorio antes de la sesión?» — una promesa que nadie iba a cumplir
+# (e2e contra raíz, escenario 4). Sin la capacidad, el campo no existe.
+RECORDATORIOS_ACEPTADOS = {
+    "type": "boolean",
+    "description": (
+        "true SOLO si el lead autorizó explícitamente recibir "
+        "recordatorios de ESTA cita. Reservar o confirmar el "
+        "horario no implica permiso. Si no lo dijo o lo rechazó, false."
+    ),
+}
+
 AGENDA_V2_SCHEMAS = [
     {"type": "function", "function": {"name": "list_bookings", "description": "Consulta las citas activas de esta conversación. Muestra sus etiquetas y pide elegir y confirmar antes de mover o cancelar. Nunca inventes una selección.", "parameters": {"type": "object", "properties": {}}}},
     {"type": "function", "function": {"name": "cancel_session", "description": "Cancela la cita seleccionada SOLO después de confirmación explícita del cliente. Usa el selectionToken devuelto por list_bookings.", "parameters": {"type": "object", "properties": {"selection_token": {"type": "string"}, "confirmation": {"type": "boolean"}}, "required": ["selection_token", "confirmation"]}}},
@@ -222,6 +229,10 @@ def tool_schemas(agenda_enabled: bool = True, agenda_v2: bool = False, coordinat
             import copy
             schemas = copy.deepcopy(TOOL_SCHEMAS)
             for tool in schemas:
+                if tool["function"]["name"] == "book_session":
+                    params = tool["function"]["parameters"]
+                    params["properties"]["recordatorios_aceptados"] = dict(RECORDATORIOS_ACEPTADOS)
+                    params["required"].append("recordatorios_aceptados")
                 if tool["function"]["name"] == "reschedule_session":
                     params = tool["function"]["parameters"]
                     params["properties"]["selection_token"] = {"type": "string", "description": "Token de list_bookings de la cita elegida y confirmada por el cliente"}
@@ -348,6 +359,14 @@ def _slots_from_payload(
     return out
 
 
+def _zona_del_negocio(ctx: AppContext) -> ZoneInfo:
+    """La zona de AGENT_TIMEZONE (la del negocio), o CDMX si no es válida."""
+    try:
+        return ZoneInfo(getattr(ctx.settings, "agent_timezone", "") or "America/Mexico_City")
+    except Exception:
+        return ZoneInfo("America/Mexico_City")
+
+
 def _slots_for_llm(slots: list[OfferedSlot]) -> list[dict[str, str]]:
     return [{"start_utc": _iso_z(s.start_utc), "label": s.label} for s in slots]
 
@@ -467,15 +486,7 @@ class ToolRuntime:
         NO se consultó, y decirle al lead "ese día no hay" sería mentirle.
         """
         if not query or query.get("date") != fecha:
-            return {
-                "ok": False,
-                "error": "consulta_por_dia_no_disponible",
-                "detalle": (
-                    f"no pude revisar el {fecha} en específico. NO digas que ese "
-                    "día no hay agenda: ofrécele los horarios que ya le diste o "
-                    "handoff para coordinarlo directo"
-                ),
-            }
+            return await self._dia_no_consultado(fecha, raw)
         status = query.get("status")
         slots = _slots_from_payload(self._conv.id, raw, limit=MAX_OFFERED_DIA)
         if status == "available" and slots:
@@ -520,6 +531,75 @@ class ToolRuntime:
             "detalle": (
                 f"{motivo}. Díselo derecho y ofrécele otro día — NUNCA acomodes "
                 "su petición en otro día como si fuera lo mismo."
+            ),
+        }
+
+    async def _dia_no_consultado(
+        self, fecha: str, raw: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        """El CRM ignoró `fecha` (un raíz de antes de la consulta por día).
+
+        Contestó con el reparto de siempre —unas horas de unos cuantos días—
+        y lo registró como la oferta de esta conversación. En el e2e contra
+        raíz, con solo las mañanas a la vista, el agente le dijo al lead
+        «mañana solo tengo por la mañana»: eso no lo sabe nadie. Se le da lo
+        que SÍ ve, dicho como lo que es (una parte), y el espejo queda igual
+        que la oferta que el CRM acaba de registrar.
+        """
+        tz = _zona_del_negocio(self._ctx)
+        del_dia: list[OfferedSlot] = []
+        otros: list[OfferedSlot] = []
+        for crudo in raw[:MAX_OFFERED]:
+            convertido = _slots_from_payload(self._conv.id, [crudo])
+            if not convertido:
+                continue
+            slot = convertido[0]
+            dia = str(crudo.get("dayIso") or "") or slot.start_utc.astimezone(tz).strftime("%Y-%m-%d")
+            (del_dia if dia == fecha else otros).append(slot)
+        slots = del_dia + otros
+        if not slots:
+            return {
+                "ok": False,
+                "error": "consulta_por_dia_no_disponible",
+                "fecha": fecha,
+                "detalle": (
+                    f"No pude revisar el {fecha} y ahora no veo horarios. NO digas "
+                    "que ese día no hay agenda ni que está lleno: no lo sabes. "
+                    "Ofrécele que el equipo le confirme el horario (handoff)."
+                ),
+            }
+        await self._ctx.store.replace_offered_slots(self._conv.id, slots)
+        self.proposed = True
+        if del_dia:
+            horas = [s.label.rsplit(",", 1)[-1].strip() for s in del_dia]
+            visto = (
+                f"Del {fecha} veo {', '.join(horas)}, pero son solo ALGUNAS horas: "
+                "puede haber más libres ese día que no veo. "
+            )
+        else:
+            horas = []
+            visto = (
+                f"Del {fecha} no veo ninguna hora en esta lista, y eso NO quiere "
+                "decir que no haya. "
+            )
+        return {
+            "ok": True,
+            "fecha": fecha,
+            "consulta_por_dia": "no_disponible",
+            "horas_que_veo_de_ese_dia": horas,
+            "slots": _slots_for_llm(slots),
+            "instrucciones": (
+                f"No pude revisar el {fecha} completo: solo veo unas horas "
+                "sueltas de unos cuantos días, NO toda la agenda. "
+                + visto
+                + "Dile qué horarios SÍ ves (máximo 3, con su etiqueta tal cual; "
+                "primero los de ese día) y pregúntale si le acomoda alguno. Si "
+                "pidió una hora o una franja que no está en la lista (la tarde, "
+                "por ejemplo), NO des a entender que ese día no la hay —ni «solo "
+                "hay en la mañana», ni «¿prefieres otro día para la tarde?»—: "
+                "ofrécele que el equipo le confirme esa hora (handoff) o revisar "
+                "otro día. NUNCA digas que ese día solo hay mañana o tarde, que a "
+                "cierta hora no hay, ni que está lleno: no lo sabes."
             ),
         }
 

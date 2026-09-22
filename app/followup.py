@@ -151,6 +151,7 @@ class FollowupWorker:
             conv=conv,
             offered=[],
             tz=_agent_tz(ctx.settings),
+            recordatorios=bool(getattr(ctx.crm, "supports_agenda_v2", False)),
         )
         history = await ctx.store.recent_messages(
             conv.id, ctx.settings.history_window

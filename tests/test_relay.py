@@ -121,3 +121,58 @@ async def test_relay_sin_firma_no_manda_header(ctx, respx_mock):
     await worker.process_due()
     assert "x-hub-signature-256" not in route.calls[0].request.headers
     await worker.aclose()
+
+
+async def _espera_tras_fallar(ctx, worker, intentos_previos: int) -> float:
+    rid = await ctx.store.enqueue_relay(b"{}", None)
+    ctx.store.relays[rid].attempts = intentos_previos
+    t0 = utcnow()
+    await worker.process_due(now=t0)
+    return (ctx.store.relays[rid].next_retry_at - t0).total_seconds()
+
+
+async def test_tras_una_caida_larga_el_relay_reintenta_cada_minuto(ctx, respx_mock):
+    """El tope era de 15 min: con el CRM de vuelta, el mensaje tardaba hasta
+    15 min más en llegar a la bandeja. Ahora, como mucho, un minuto."""
+    respx_mock.post(CRM_WEBHOOK_URL).mock(side_effect=httpx.ConnectError("caído"))
+    worker = RelayWorker(ctx.store, CRM_WEBHOOK_URL, asyncio.Event())
+    assert await _espera_tras_fallar(ctx, worker, 2) == 8  # sigue creciendo al doble
+    assert await _espera_tras_fallar(ctx, worker, 12) == 60
+    await worker.aclose()
+
+
+async def test_el_tope_del_relay_se_configura(ctx, respx_mock):
+    respx_mock.post(CRM_WEBHOOK_URL).mock(return_value=httpx.Response(503))
+    worker = RelayWorker(ctx.store, CRM_WEBHOOK_URL, asyncio.Event(), backoff_cap=20)
+    assert await _espera_tras_fallar(ctx, worker, 12) == 20
+    await worker.aclose()
+
+
+def test_relay_backoff_cap_seconds_sale_del_entorno(monkeypatch):
+    from app.config import Settings
+
+    monkeypatch.delenv("RELAY_BACKOFF_CAP_SECONDS", raising=False)
+    assert Settings(_env_file=None).relay_backoff_cap_seconds == 60
+    monkeypatch.setenv("RELAY_BACKOFF_CAP_SECONDS", "30")
+    assert Settings(_env_file=None).relay_backoff_cap_seconds == 30
+
+
+async def test_al_entregar_lo_que_antes_fallo_avisa_que_el_crm_volvio(ctx, respx_mock):
+    """Es lo que despierta a los turnos que esperaban al CRM (app/turn.py)."""
+    respx_mock.post(CRM_WEBHOOK_URL).mock(
+        side_effect=[httpx.Response(200), httpx.Response(503), httpx.Response(200)]
+    )
+    avisos: list[int] = []
+    worker = RelayWorker(
+        ctx.store, CRM_WEBHOOK_URL, asyncio.Event(), al_volver=lambda: avisos.append(1)
+    )
+    await ctx.store.enqueue_relay(b"{}", None)
+    await worker.process_due(now=utcnow())
+    assert avisos == []  # a la primera: el CRM nunca se fue
+    await ctx.store.enqueue_relay(b"{}", None)
+    t1 = utcnow()
+    await worker.process_due(now=t1)  # 503
+    assert avisos == []
+    await worker.process_due(now=t1 + timedelta(seconds=10))  # entrega
+    assert avisos == [1]
+    await worker.aclose()

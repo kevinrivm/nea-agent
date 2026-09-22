@@ -29,6 +29,20 @@ class CrmError(Exception):
     """Fallo genérico hablando con el CRM (red, 5xx, 401...)."""
 
 
+class CrmUnreachable(CrmError):
+    """El CRM no contestó: red caída, timeout, 5xx o 429.
+
+    Es pasajero por definición y se distingue del 404 de verdad («no conozco
+    esa identidad»): un turno que no alcanzó al CRM se reintenta
+    (app/turn.py), uno al que el CRM le dijo que no, no.
+    """
+
+
+def es_caida(status_code: int) -> bool:
+    """¿Este código dice «ahora no puedo» y no «no»?"""
+    return status_code >= 500 or status_code == 429
+
+
 class CrmConflict(CrmError):
     """409 tipado del CRM: ai_paused | window_closed | slot_taken."""
 
@@ -183,7 +197,7 @@ class CrmClient:
         try:
             return await self._http.request(method, url, **kwargs)
         except httpx.HTTPError as exc:
-            raise CrmError(f"error de red hacia el CRM: {exc}") from exc
+            raise CrmUnreachable(f"error de red hacia el CRM: {exc}") from exc
 
     async def get_context(self, wa_identity: str) -> dict[str, Any] | None:
         """Contexto conversacional; None si el CRM aún no conoce la identidad (404)."""
@@ -192,6 +206,8 @@ class CrmClient:
         )
         if resp.status_code == 404:
             return None
+        if es_caida(resp.status_code):
+            raise CrmUnreachable(f"context devolvió {resp.status_code}")
         if resp.status_code != 200:
             raise CrmError(f"context devolvió {resp.status_code}")
         data: dict[str, Any] = resp.json()

@@ -37,6 +37,11 @@ cerebro conversacional.
 - **Degradación silenciosa**: si el LLM o el CRM fallan, el lead jamás recibe
   texto roto — silencio, reintentos con backoff, colas persistentes
   (`relay`, `pending_send`) y handoff de error.
+- **Un CRM caído no se come el turno**: si al empezar un turno el CRM no
+  contesta, la misma ráfaga se reintenta con esperas crecientes
+  (`TURN_RETRY_DELAYS`, 15 s → 5 min, hasta ~8 min) y lo que el lead escriba
+  mientras tanto se contesta en la MISMA respuesta. Si el CRM no vuelve a
+  tiempo, la conversación pasa a un humano en cuanto conteste.
 
 ## La persona es del negocio, no del código
 
@@ -67,8 +72,10 @@ Meta Cloud API ── webhook ──► Nea (este repo)
 
 **El relay es lo que hace que el CRM vea el mensaje.** Cada POST de Meta se
 encola en `relay_queue` (el Postgres de Nea) antes de parsear nada, y el
-`RelayWorker` se lo reenvía crudo al webhook del CRM —firma intacta, backoff
-hasta 24 h—. Si esa cola no sale, el CRM se queda sin los entrantes y sin los
+`RelayWorker` se lo reenvía crudo al webhook del CRM —firma intacta,
+reintentos hasta 24 h con una espera que se dobla hasta
+`RELAY_BACKOFF_CAP_SECONDS` (60 s): al volver el CRM, la cola se vacía en un
+minuto como mucho—. Si esa cola no sale, el CRM se queda sin los entrantes y sin los
 estados de entrega, y a un contacto nuevo Nea no le contesta:
 `/api/bot/context` responde 404 hasta que el relay aterriza. Como solo corre
 contra Postgres, la cubren las pruebas de `tests/test_pg_store.py` (ver
@@ -190,6 +197,75 @@ versión corre, pasa los build args `NEA_VERSION` y `SOURCE_COMMIT`
   desde una línea tester vía [Evolution API](https://doc.evolution-api.com/),
   con pausas mínimas, tope de mensajes y kill-switch de archivo.
 
+### Prueba de punta a punta contra Vocero raíz
+
+`scripts/e2e_contra_raiz.py` monta el par como se instala en modo estándar
+(Meta → Nea → relay al CRM; Nea contesta por `/api/bot/*`) y hace de Meta y
+de cliente: manda webhooks con la forma real de la Cloud API, firmados con
+`META_APP_SECRET`, y comprueba lo observable en la API del CRM, su base y el
+outbox del wa-mock. Nada sale a Meta ni a WhatsApp: el CRM envía por su
+wa-mock.
+
+**Requisitos**: un checkout de [vocero-crm](https://github.com/kevinrivm/vocero-crm)
+con `pnpm install` hecho (el guion lo arranca con `next dev` y le aplica las
+migraciones), Node en el `PATH`, este repo con sus dependencias, y un Postgres
+con dos bases (una para el CRM y otra para Nea; vacías o de una corrida
+anterior, las dos sirven). El guion levanta y apaga el CRM y Nea; el Postgres
+no.
+
+**Variables** (del entorno o de uno o más `--env-file`; de esos archivos solo
+se leen estas tres, así que puede ser el vault de operación):
+
+| Variable | Qué es |
+|---|---|
+| `LLM_API_KEY` | Llave de OpenRouter. Nunca va por argv ni se imprime |
+| `CRM_DATABASE_URL` | Base del CRM |
+| `NEA_DATABASE_URL` | Base de Nea |
+
+Lo demás (`BOT_API_KEY`, `META_APP_SECRET`, tokens del webhook, secretos de
+sesión y de cifrado) lo inventa cada corrida.
+
+```bash
+python scripts/e2e_contra_raiz.py --crm-dir ../vocero-crm \
+  --env-file ../.env --env-file ./runtime-e2e.env --out ./e2e-salida
+# --escenarios 1-5,9 para correr solo algunos · --presupuesto 0.50 (USD)
+```
+
+Los puertos son opciones (`--crm-port 3800`, `--nea-port 8100`,
+`--medidor-port 8190`, los de por defecto): para correr dos pares a la vez, cada
+uno con sus puertos, su `--out` y su propio Postgres. El `--crm-dir` tampoco se
+comparte entre corridas simultáneas: `next dev` escribe su `.next` ahí.
+
+**Qué comprueba**, con un cliente nuevo por historia: (1) el primer mensaje
+llega a la bandeja del CRM en segundos y la respuesta de Nea sale por el
+wa-mock sin Markdown; (2) `delivered` y `read` de Meta avanzan el estado del
+mensaje en el CRM; (3) pedir horario trae huecos que el CRM registró como
+ofrecidos, elegir uno crea la cita, el lead sube a la siguiente etapa abierta
+y la confirmación dice «Enlace de la reunión» con la sala fija (no «Zoom»), y
+Nea no afirma que un día «solo tiene mañana» por lo que no vio;
+(4) Nea sabe a qué hora quedó la cita (bloque `booking` de `/api/bot/context`)
+y no ofrece recordatorios, que el CRM raíz no manda;
+(5) pedir una persona deja el handoff en la conversación y una despedida; (6)
+tres rellenos seguidos cierran con una despedida y `cierre_sin_rumbo` en la
+ficha, el relleno siguiente se calla y una pregunta con contenido reabre; (7)
+con el CRM apagado ~20 s y dos mensajes del cliente en medio, el relay entrega
+los dos al volver y el cliente recibe UNA respuesta que contesta los dos (un
+solo turno con la ráfaga completa, sin handoff); (8) volver a guardar la conexión de WhatsApp
+no borra el override de la WABA que fija Nea; (9) `/health` enseña versión,
+modo `estándar` y la cola del relay en 0.
+
+En `--out` quedan una transcripción por cliente, `resultado.json` (evidencia
+por escenario, latencia por turno con mediana y p95, gasto del modelo),
+`medidor-llm.json` y los logs del CRM y de Nea. Sale con 0 si todo pasa, 1 si
+algún escenario falla y 2 si no se pudo montar el par.
+
+**Cuesta unos centavos de LLM** (~20 turnos contra `z-ai/glm-5.3-flash`) y
+tarda unos 5 min; el escenario 7 es el más largo: apaga y vuelve a levantar el
+CRM y espera a que el turno que no lo alcanzó se reintente. Nea
+habla con OpenRouter a través de un medidor local que reenvía los bytes tal
+cual, cuenta los tokens y, antes de pasarse del `--presupuesto`, contesta 402
+sin llamar; tampoco deja pasar otro modelo que el de la prueba.
+
 ## Definición de Hecho
 
 Los tests unitarios (`pytest`, sin red ni Postgres) son el piso, no el techo.
@@ -199,7 +275,7 @@ Los NUNCA del chasis en `app/prompt.py` no se relajan sin re-correr esa
 verificación de comportamiento.
 
 ```bash
-pytest -q          # 464 tests: 427 offline + 37 de PgStore, que se saltan sin Postgres
+pytest -q          # 467 tests: 430 offline + 37 de PgStore, que se saltan sin Postgres
 ```
 
 Las de `tests/test_pg_store.py` corren `PgStore` contra un Postgres de verdad

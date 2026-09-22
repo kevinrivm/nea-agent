@@ -153,19 +153,63 @@ async def test_un_dia_sin_horas_no_borra_lo_ya_ofrecido(runtime_y_ctx, respx_moc
     assert len(await ctx.store.get_offered_slots(conv.id)) == 3
 
 
-async def test_si_el_crm_ignora_la_fecha_no_se_afirma_nada_de_ese_dia(
+async def test_si_el_crm_ignora_la_fecha_dice_lo_que_ve_sin_negar_la_tarde(
     runtime_y_ctx, respx_mock
 ):
-    # Un CRM que no conoce `date` devuelve el reparto de siempre, sin
-    # `query.date`. Ese día NO se consultó.
+    """El e2e contra raíz (escenario 3): «¿tienen espacio mañana en la tarde?»
+    contra un CRM que ignora `date`. Veía solo las mañanas del reparto y
+    contestó «mañana solo tengo por la mañana». Ese día NO se consultó."""
     runtime, ctx, conv = runtime_y_ctx
+    reparto = _horas("2026-09-11", 2) + _horas("2026-09-10", 3)
     respx_mock.get(AVAILABILITY).mock(
-        return_value=httpx.Response(200, json={"slots": _horas("2026-09-10", 3)})
+        return_value=httpx.Response(200, json={"slots": reparto})
+    )
+    result = await runtime.execute("propose_slots", {"fecha": "2026-09-10"})
+    assert result["ok"] is True
+    assert result["consulta_por_dia"] == "no_disponible"
+    # Lo que SÍ ve de ese día, primero; sin `dayIso`, el día sale de la zona
+    # del negocio (15:00 UTC = 09:00 en CDMX, el mismo día).
+    assert result["horas_que_veo_de_ese_dia"] == ["09:00", "09:30", "10:00"]
+    assert [s["start_utc"][:10] for s in result["slots"]] == ["2026-09-10"] * 3 + ["2026-09-11"] * 2
+    instrucciones = result["instrucciones"]
+    assert "son solo ALGUNAS horas" in instrucciones
+    assert "NUNCA digas que ese día solo hay mañana o tarde" in instrucciones
+    # Lo que la corrida contra el raíz sin consulta por día todavía dejaba
+    # pasar: «¿prefieres otro día para la tarde?» también niega esa tarde.
+    assert "NO des a entender que ese día no la hay" in instrucciones
+    assert "ofrécele que el equipo le confirme esa hora (handoff) o revisar otro día" in instrucciones
+    # El espejo queda como la oferta que el CRM acaba de registrar: lo que se
+    # le enseña al lead se puede reservar.
+    assert len(await ctx.store.get_offered_slots(conv.id)) == 5
+
+
+async def test_si_el_crm_ignora_la_fecha_y_ese_dia_no_viene_no_dice_que_no_hay(
+    runtime_y_ctx, respx_mock
+):
+    runtime, _, _ = runtime_y_ctx
+    reparto = [dict(h, dayIso="2026-09-10") for h in _horas("2026-09-10", 3)]
+    respx_mock.get(AVAILABILITY).mock(
+        return_value=httpx.Response(200, json={"slots": reparto})
+    )
+    result = await runtime.execute("propose_slots", {"fecha": "2026-09-17"})
+    assert result["ok"] is True
+    assert result["horas_que_veo_de_ese_dia"] == []
+    assert "eso NO quiere decir que no haya" in result["instrucciones"]
+    assert len(result["slots"]) == 3  # lo que sí hay, para ofrecer otro día
+
+
+async def test_si_el_crm_ignora_la_fecha_y_no_da_nada_no_se_afirma_nada(
+    runtime_y_ctx, respx_mock
+):
+    runtime, _, _ = runtime_y_ctx
+    respx_mock.get(AVAILABILITY).mock(
+        return_value=httpx.Response(200, json={"slots": []})
     )
     result = await runtime.execute("propose_slots", {"fecha": "2026-09-17"})
     assert result["ok"] is False
     assert result["error"] == "consulta_por_dia_no_disponible"
     assert "NO digas que ese día no hay agenda" in result["detalle"]
+    assert "handoff" in result["detalle"]
 
 
 async def test_fecha_mal_escrita_se_corrige_sin_ir_al_crm(runtime_y_ctx, respx_mock):

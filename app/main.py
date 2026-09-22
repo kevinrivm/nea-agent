@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from contextlib import asynccontextmanager
 from functools import partial
 from pathlib import Path
@@ -35,7 +36,7 @@ from app.profile import ProfileProvider
 from app.relay import RelayWorker
 from app.sender import SenderWorker
 from app.state import AppContext
-from app.turn import handle_flush
+from app.turn import cancelar_pendientes, handle_flush, reanudar_pendientes
 from app.version import commit, version
 from app.webhook import router as webhook_router
 
@@ -44,6 +45,29 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 logger = logging.getLogger("nea.main")
+
+
+class SinTokenDelWebhook(logging.Filter):
+    """Tacha el token del webhook del CRM en los logs de httpx.
+
+    httpx escribe a INFO la URL de cada petición, y la del relay lleva el
+    `META_WEBHOOK_VERIFY_TOKEN` del CRM en la ruta
+    (`/api/webhooks/wa/<token>`): cada mensaje entrante lo dejaba en los logs
+    del contenedor. El resto de la línea (método, ruta, código) se queda,
+    que es lo que sirve para depurar.
+    """
+
+    _TOKEN = re.compile(r"(/api/webhooks/wa/)[^/\s\"?#]+")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        mensaje = record.getMessage()
+        limpio = self._TOKEN.sub(r"\1***", mensaje)
+        if limpio != mensaje:
+            record.msg, record.args = limpio, None
+        return True
+
+
+logging.getLogger("httpx").addFilter(SinTokenDelWebhook())
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 
@@ -196,7 +220,14 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 c.agenda_sonda.ttl,
             )
 
-        relay_worker = RelayWorker(c.store, c.settings.crm_webhook_url, c.relay_wake)
+        relay_worker = RelayWorker(
+            c.store,
+            c.settings.crm_webhook_url,
+            c.relay_wake,
+            backoff_cap=c.settings.relay_backoff_cap_seconds,
+            # El CRM volvió: los turnos que lo esperaban no aguardan su espera.
+            al_volver=partial(reanudar_pendientes, c),
+        )
         followup_worker = FollowupWorker(c)
         sender_worker = SenderWorker(c)
         workers = [
@@ -228,6 +259,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             await relay_worker.aclose()
             if c.coalescer is not None:
                 await c.coalescer.aclose()
+            await cancelar_pendientes(c)
             if own_resources:
                 await c.crm.aclose()
                 if c.registro is not None:
