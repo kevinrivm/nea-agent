@@ -225,7 +225,58 @@ candado de cierre, reintentos, tiempos) tiene default y está explicado en
 [`.env.example`](.env.example). Los nombres viejos `OPENAI_*` siguen
 funcionando.
 
-### 4. Comprobar
+### 4. El webhook de Meta, a Nea
+
+Nea recibe a Meta en `https://nea.tu-dominio.com/webhook`: `GET` para la
+verificación (con tu `VERIFY_TOKEN`) y `POST` para los eventos (con
+`META_APP_SECRET` puesto, una firma inválida o ausente da 401).
+
+Apúntalo con un **override a nivel del número de teléfono**. Meta busca a
+dónde mandar cada webhook en este orden: el override del número, el de la WABA
+y, al final, la URL de callback de la app. El del número gana, y nada del CRM
+lo toca.
+
+```http
+POST https://graph.facebook.com/v25.0/{PHONE_NUMBER_ID}
+Authorization: Bearer {TOKEN_DE_WHATSAPP}
+Content-Type: application/json
+
+{"webhook_configuration": {"override_callback_uri": "https://nea.tu-dominio.com/webhook",
+                           "verify_token": "{VERIFY_TOKEN de Nea}"}}
+```
+
+Antes de mandarlo:
+
+- Nea arriba y contestando `GET /webhook` con ese mismo token: Meta verifica
+  la URL.
+- La app suscrita a la WABA (`GET /{WABA_ID}/subscribed_apps` no viene vacío)
+  y el campo `messages` suscrito en la app de Meta (App Dashboard → Webhooks).
+  El override cambia a dónde llegan los webhooks, no hace que existan.
+- El token con el permiso `whatsapp_business_management`, y la URL de 200
+  caracteres o menos.
+
+Que el POST conteste bien no basta. Reléelo:
+
+```http
+GET https://graph.facebook.com/v25.0/{PHONE_NUMBER_ID}?fields=webhook_configuration
+```
+
+`webhook_configuration.phone_number` tiene que ser la URL de Nea;
+`whatsapp_business_account` y `application` son los de respaldo. Para quitarlo,
+el mismo POST con `"override_callback_uri": ""`: los webhooks vuelven al
+override de la WABA (en una instalación de Vocero, el CRM) o, si no hay, al
+callback de la app. Las plantillas no siguen ningún override: sus eventos van
+siempre al callback de la app.
+
+**La trampa: `POST /{WABA_ID}/subscribed_apps` sin cuerpo.** Así documenta Meta
+cómo se *borra* el override de la WABA. Vocero raíz hasta 1.3.0 hace esa
+llamada cada vez que guardas la conexión en Configuración → WhatsApp (también
+al cambiar el token): si Nea estaba en la WABA, deja de recibir sin ningún
+aviso. Desde 1.4.0 el CRM primero consulta y respeta un override que ya exista,
+pero si esa consulta falla, re-suscribe igual. El override del número no se
+toca con esa llamada: por eso Nea va ahí.
+
+### 5. Comprobar
 
 - `GET https://nea.tu-dominio.com/health` responde 200 con
   `"version": "1.0.0"`, `"mode": "estándar"` y `relay.pendientes` en 0
