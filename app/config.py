@@ -113,6 +113,21 @@ class Settings(BaseSettings):
         default="throughput", validation_alias=AliasChoices("LLM_PROVIDER_SORT")
     )
 
+    # Cuánto se espera al proveedor del modelo en CADA intento, en segundos.
+    # Vale para conversar y para transcribir notas de voz (es el mismo cliente).
+    #
+    # Sin esto el SDK esperaba hasta 600 s por intento y además reintentaba
+    # dos veces por su cuenta, encima de los reintentos de Nea (llm.py): un
+    # proveedor colgado dejaba al lead mirando "escribiendo…" media hora larga
+    # antes de llegar al handoff `error`. Ahora el SDK no reintenta —ya lo
+    # hace Nea, con su backoff— y un intento que se pasa de este tope cuenta
+    # como fallido: tras los reintentos, silencio + handoff `error`.
+    llm_timeout_seconds: float = Field(
+        default=45.0,
+        gt=0,
+        validation_alias=AliasChoices("LLM_TIMEOUT_SECONDS"),
+    )
+
     # NO hay tope de tokens de salida, y es una decisión, no un olvido.
     #
     # En huaraches se puso uno el 8-sep con un banco que prometía partir a la
@@ -122,6 +137,13 @@ class Settings(BaseSettings):
     # DOS. Se quitó el mismo día.
 
     history_window: int = 10
+
+    # Cada cuántos segundos, como mucho, se le vuelve a preguntar al CRM si
+    # agenda (la bandera AGENDA de Vocero). Antes se preguntaba solo al
+    # arrancar: encenderla exigía reiniciar Nea. La pregunta la hace el primer
+    # turno que llega con la respuesta vencida, con timeout corto; si el CRM no
+    # contesta, se queda la última respuesta. 0 = en cada turno.
+    agenda_probe_ttl_seconds: float = Field(default=60.0, ge=0)
 
     # Guardarraíles y tiempos
     allowed_wa_ids: str = ""

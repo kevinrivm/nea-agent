@@ -11,11 +11,13 @@ import json
 import logging
 import re
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, AsyncIterator
 from zoneinfo import ZoneInfo
 
 from app import media
+from app.agenda import agenda_vigente
 from app.config import canonical_identity
 from app.crm import CrmConflict, CrmError
 from app.hostility import ALERT as HOSTILITY_ALERT, hostile_streak
@@ -86,18 +88,103 @@ async def conversation_lock(ctx: AppContext, identity: str) -> AsyncIterator[Non
             ctx.turn_lock_users[identity] = remaining
 
 
-async def handle_flush(ctx: AppContext, identity: str, items: list[Any]) -> None:
-    """Callback del coalescer — nunca propaga excepciones."""
+@dataclass
+class _Turno:
+    """Lo que un turno sabe de sí mismo, para la red de seguridad.
+
+    `run_turn` lo va llenando mientras avanza; si revienta, `handle_flush` lo
+    lee para saber a qué conversación del CRM avisarle y si ya se la había
+    pasado a un humano.
+    """
+
+    # La conversación del CRM que este turno tomó: la que trajo el despacho
+    # (cloud) o la del contexto, una vez pasados los gates.
+    crm_conversation_id: str | None = None
+    # El motivo del handoff que este turno ya registró, si registró uno.
+    handoff: str | None = None
+
+
+async def handle_flush(
+    ctx: AppContext,
+    identity: str,
+    items: list[Any],
+    crm_conversation_id: str | None = None,
+) -> None:
+    """Callback del coalescer (y del despacho en cloud) — nunca propaga excepciones.
+
+    Un turno que revienta por algo inesperado —un fallo de código, la base
+    caída a medio turno, un CRM que contesta algo que no es JSON— dejaba al
+    lead sin respuesta y sin nadie que lo viera: solo quedaba el log. Ahora,
+    además del log (con los wamids de la ráfaga, para encontrarla), se
+    registra un handoff `error` en el CRM si se sabe de qué conversación era,
+    para que un humano la atienda. El handoff va por `ctx.crm`, el cliente
+    del turno: `/api/bot` en el modo de siempre y, en cloud, `/api/brains`
+    con la credencial de ESA organización — igual que el handoff normal.
+
+    `crm_conversation_id` lo pasa el despacho en cloud, donde el CRM ya dijo
+    qué conversación es; en el modo de siempre se sabe hasta que el turno
+    pasa los gates con el contexto del CRM.
+    """
+    turno = _Turno(crm_conversation_id=crm_conversation_id or None)
     try:
         async with conversation_lock(ctx, identity):
-            await run_turn(ctx, identity, items)
+            await run_turn(ctx, identity, items, turno)
     except Exception:
-        logger.exception("turno de %s reventó — silencio", identity)
+        wamids = [
+            str(w) for w in (getattr(m, "wa_message_id", None) for m in items) if w
+        ]
+        logger.exception(
+            "turno de %s reventó (wamids: %s) — silencio",
+            identity,
+            ", ".join(wamids) or "ninguno",
+        )
+        await _handoff_de_emergencia(ctx, identity, turno)
+
+
+async def _handoff_de_emergencia(ctx: AppContext, identity: str, turno: _Turno) -> None:
+    """La red de seguridad de `handle_flush`. Best-effort: nunca lanza.
+
+    No registra un segundo handoff encima de uno que el turno ya hizo: el
+    motivo es lo que el dueño lee en su bandeja, y pisar un «el cliente pidió
+    humano» con un «error» le diría otra cosa.
+    """
+    if turno.handoff is not None:
+        logger.info(
+            "turno de %s: ya se había pasado a un humano (%s) — sin otro handoff",
+            identity,
+            turno.handoff,
+        )
+        return
+    if not turno.crm_conversation_id:
+        logger.warning(
+            "turno de %s: no sé de qué conversación del CRM era — sin handoff",
+            identity,
+        )
+        return
+    try:
+        await ctx.crm.post_handoff(turno.crm_conversation_id, "error")
+    except Exception as exc:
+        logger.error(
+            "turno de %s: tampoco pude registrar el handoff error en %s (%s)",
+            identity,
+            turno.crm_conversation_id,
+            exc,
+        )
+        return
+    logger.info(
+        "turno de %s: handoff error registrado en %s tras el fallo",
+        identity,
+        turno.crm_conversation_id,
+    )
 
 
 async def run_turn(
-    ctx: AppContext, identity: str, inbound: list[InboundMessage]
+    ctx: AppContext,
+    identity: str,
+    inbound: list[InboundMessage],
+    turno: _Turno | None = None,
 ) -> None:
+    turno = turno if turno is not None else _Turno()
     settings = ctx.settings
 
     # --- Gate 1: allowlist de pruebas (Constitución V) --------------------
@@ -157,6 +244,9 @@ async def run_turn(
     if not conversation_info.get("windowOpen", False):
         logger.info("turno %s: ventana de 24 h cerrada — silencio", identity)
         return
+    # Desde aquí el turno es de Nea: si revienta, la red de seguridad de
+    # handle_flush sabe a qué conversación del CRM avisarle.
+    turno.crm_conversation_id = str(crm_conv_id)
 
     await ctx.store.update_conversation(
         conv.id,
@@ -196,6 +286,10 @@ async def run_turn(
     )
 
     # --- Armar mensajes para el LLM ---------------------------------------
+    # ¿El CRM agenda HOY? La respuesta caduca (app/agenda.py): si venció, este
+    # turno la vuelve a pedir, con timeout corto. Así encender AGENDA en el
+    # CRM llega sin reiniciar Nea, y un 404 de la bandera no apaga para siempre.
+    ctx.agenda_enabled = await agenda_vigente(ctx)
     referral = next((m.referral_headline for m in inbound if m.referral_headline), None)
     offered = await ctx.store.get_offered_slots(conv.id)
     profile = await resolve_profile(ctx)
@@ -252,7 +346,7 @@ async def run_turn(
             identity,
             exc,
         )
-        await _safe_handoff(ctx, str(crm_conv_id), "error")
+        await _safe_handoff(ctx, str(crm_conv_id), "error", turno)
         await ctx.store.update_conversation(
             conv.id, phase="cerrada", followup_due_at=None
         )
@@ -273,7 +367,7 @@ async def run_turn(
             final_text = None
         if final_text is None or _respuesta_invalida(final_text, previos):
             logger.error("turno %s: la segunda respuesta tampoco sirve — silencio + handoff error", identity)
-            await _safe_handoff(ctx, str(crm_conv_id), "error")
+            await _safe_handoff(ctx, str(crm_conv_id), "error", turno)
             await ctx.store.update_conversation(conv.id, phase="cerrada", followup_due_at=None)
             return
 
@@ -293,7 +387,7 @@ async def run_turn(
     # El handoff se ejecuta DESPUÉS de la despedida (si no, el CRM la rechaza
     # con 409 ai_paused).
     if runtime.handoff_reason is not None:
-        await _safe_handoff(ctx, str(crm_conv_id), runtime.handoff_reason)
+        await _safe_handoff(ctx, str(crm_conv_id), runtime.handoff_reason, turno)
 
     # --- Fase + seguimiento -----------------------------------------------
     updates: dict[str, Any] = {"greeted": True}
@@ -480,9 +574,15 @@ async def _send(ctx: AppContext, conv_id: int, crm_conv_id: str, text: str) -> b
     return False
 
 
-async def _safe_handoff(ctx: AppContext, crm_conv_id: str, reason: str) -> None:
+async def _safe_handoff(
+    ctx: AppContext, crm_conv_id: str, reason: str, turno: _Turno | None = None
+) -> None:
     try:
         await ctx.crm.post_handoff(crm_conv_id, reason)
         logger.info("handoff registrado en el CRM (reason=%s)", reason)
     except CrmError as exc:
         logger.error("no pude registrar el handoff (%s): %s", reason, exc)
+        return
+    # Queda anotado para que la red de seguridad no registre otro encima.
+    if turno is not None:
+        turno.handoff = reason

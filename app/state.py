@@ -20,6 +20,25 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# Lo único que `update_conversation` puede tocar. Vive aquí y no en db.py para
+# que MemoryStore rechace exactamente lo mismo que Postgres: si aceptara
+# cualquier campo, un nombre mal escrito pasaría todas las pruebas y reventaría
+# el turno en producción — la misma distancia entre pruebas y base de verdad
+# que escondió el fallo del relay.
+COLUMNAS_DE_CONVERSACION = frozenset(
+    {
+        "crm_conversation_id",
+        "phase",
+        "greeted",
+        "media_notice_sent",
+        "followup_due_at",
+        "followup_sent",
+        "last_inbound_at",
+        "stalled_at",
+    }
+)
+
+
 # ---------------------------------------------------------------- modelos ---
 
 
@@ -261,7 +280,11 @@ class MemoryStore:
         clave = (organization_id, wa_identity)
         cid = self._conv_by_identity.get(clave)
         if cid is not None:
-            return self.conversations[cid]
+            conv = self.conversations[cid]
+            # Igual que el ON CONFLICT de PgStore: el slug se refresca, porque
+            # un miembro puede renombrar su subdominio y el id no cambia.
+            conv.organization_slug = organization_slug
+            return conv
         cid = next(self._ids)
         conv = Conversation(
             id=cid,
@@ -274,6 +297,11 @@ class MemoryStore:
         return conv
 
     async def update_conversation(self, conversation_id: int, **fields: Any) -> None:
+        desconocidas = set(fields) - COLUMNAS_DE_CONVERSACION
+        if desconocidas:
+            raise ValueError(
+                f"columnas desconocidas en update_conversation: {desconocidas}"
+            )
         conv = self.conversations[conversation_id]
         for key, value in fields.items():
             setattr(conv, key, value)
@@ -411,10 +439,15 @@ class AppContext:
     coalescer: Any | None = None
     relay_wake: asyncio.Event = field(default_factory=asyncio.Event)
     # ¿El CRM de esta instancia tiene motor de agenda? Vocero lo trae detrás de
-    # una bandera de despliegue y viene apagado por defecto. Se resuelve al
-    # arrancar (y se corrige solo si en caliente resulta que no está), para no
+    # una bandera de despliegue y viene apagado por defecto. Es lo que vale en
+    # el turno en curso: el turno lo refresca al empezar desde `agenda_sonda`
+    # (y una herramienta lo apaga si choca con el 404 de la bandera), para no
     # ofrecerle horarios a un lead contra un CRM que no puede agendarlos.
     agenda_enabled: bool = True
+    # La respuesta del CRM con caducidad (app/agenda.py): encender o apagar
+    # AGENDA allá llega sin reiniciar Nea. None = sin sonda (pruebas que fijan
+    # `agenda_enabled` a mano).
+    agenda_sonda: Any | None = None
     # Un candado por identidad: los turnos de UNA conversación se serializan.
     # Sin esto, una ráfaga que llega mientras el turno anterior sigue en vuelo
     # abre un segundo turno con contexto viejo (se reservó una cita antes de

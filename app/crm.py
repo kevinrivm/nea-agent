@@ -39,7 +39,8 @@ class CrmConflict(CrmError):
 
 
 class AgendaUnavailable(CrmError):
-    """El CRM no tiene agenda (404 en `/api/bot/availability|bookings`).
+    """El CRM no tiene agenda (404 VACÍO en `/api/bot/availability|bookings`;
+    ver `_agenda_apagada`).
 
     Vocero trae el motor de agendamiento detrás de una bandera de despliegue
     (`AGENDA`) y viene APAGADA por defecto: en una instancia así esos endpoints
@@ -108,6 +109,40 @@ def _booking_conflict(response: httpx.Response) -> CrmConflict:
     if code == "slot_not_offered":
         return SlotNotOffered(payload)
     return CrmConflict(code, payload)
+
+
+def _agenda_apagada(response: httpx.Response) -> bool:
+    """¿Este 404 es el de la bandera `AGENDA` apagada?
+
+    Vocero contesta 404 de dos maneras en su superficie de agenda, y no
+    significan lo mismo:
+
+    - con la bandera apagada, VACÍO (`new Response(null, {status: 404})`): el
+      endpoint no existe en esa instancia;
+    - con la agenda encendida, con el sobre de error del CRM
+      (`{"error": {"code": "not_found"}}`, o `{"ok": false, "code": ...}` en
+      `/api/brains`): no existe la conversación o la cita, el endpoint sí.
+
+    Leer el segundo como el primero apagaba la agenda de todo el proceso por
+    una conversación que no se encontró, y la sonda de cloud —que pregunta por
+    una conversación inventada— concluía «apagada» justo con la agenda
+    encendida. Un cuerpo que no es el JSON del CRM (la página HTML de un CRM
+    viejo que no tiene la ruta) cuenta como apagada.
+    """
+    return response.status_code == 404 and not _payload(response)
+
+
+def _404_de_agenda(response: httpx.Response, que: str) -> None:
+    """Traduce el 404 de una ruta de agenda; no hace nada con otro código.
+
+    Solo el de la bandera es `AgendaUnavailable` (el agente deja de ofrecer
+    citas). El del sobre de error es un fallo normal de ESA petición.
+    """
+    if response.status_code != 404:
+        return
+    if _agenda_apagada(response):
+        raise AgendaUnavailable("este CRM no tiene el motor de agenda encendido")
+    raise CrmError(f"{que} devolvió 404 ({_conflict_code(response)})")
 
 
 # Catálogo cerrado del CRM para handoff.reason (006). El LLM escribe motivos
@@ -239,8 +274,7 @@ class CrmClient:
         if days:
             params["days"] = days
         resp = await self._request("GET", "/api/bot/availability", params=params)
-        if resp.status_code == 404:
-            raise AgendaUnavailable("este CRM no tiene el motor de agenda encendido")
+        _404_de_agenda(resp, "availability")
         if resp.status_code != 200:
             raise CrmError(f"availability devolvió {resp.status_code}")
         slots = resp.json().get("slots") or []
@@ -269,31 +303,44 @@ class CrmClient:
         if date:
             params["date"] = date
         resp = await self._request("GET", "/api/bot/availability", params=params)
-        if resp.status_code == 404:
-            raise AgendaUnavailable("este CRM no tiene el motor de agenda encendido")
+        _404_de_agenda(resp, "availability")
         if resp.status_code != 200:
             raise CrmError(f"availability devolvió {resp.status_code}")
         data = resp.json()
         return {"slots": list(data.get("slots") or []), "query": data.get("query")}
 
-    async def agenda_available(self) -> bool:
-        """¿Este CRM ofrece agenda?
+    async def sondear_agenda(self, timeout: float | None = None) -> bool | None:
+        """¿Este CRM ofrece agenda? True/False, o None si no se pudo saber.
 
         Se pregunta SIN `conversationId` a propósito: con la agenda encendida
-        el CRM responde 422 ("falta conversationId") y con ella apagada, 404.
-        Basta para distinguir, no ensucia la oferta de ninguna conversación y
-        no necesita un endpoint nuevo del CRM.
+        el CRM responde 422 ("falta conversationId") y con ella apagada, 404
+        vacío. Basta para distinguir, no ensucia la oferta de ninguna
+        conversación y no necesita un endpoint nuevo del CRM.
 
-        Ante cualquier otra cosa (red caída, 5xx) se asume que SÍ hay agenda:
-        equivocarse hacia "sí" solo cuesta un intento fallido más adelante,
-        que ya degrada solo; equivocarse hacia "no" apagaría el agendamiento
-        de una instancia que sí lo tiene.
+        None = no se puede concluir (red caída, timeout, 5xx). Qué hacer con
+        eso lo decide quien pregunta: al arrancar se asume que sí
+        (`agenda_available`); al re-sondear se queda con lo último que supo
+        (app/agenda.py). `timeout` corto para no dejar a un turno esperando.
         """
+        extra: dict[str, Any] = {} if timeout is None else {"timeout": timeout}
         try:
-            resp = await self._request("GET", "/api/bot/availability")
+            resp = await self._request("GET", "/api/bot/availability", **extra)
         except CrmError:
-            return True
-        return resp.status_code != 404
+            return None
+        if resp.status_code >= 500:
+            return None
+        return not _agenda_apagada(resp)
+
+    async def agenda_available(self) -> bool:
+        """¿Este CRM ofrece agenda? La sonda, con la duda resuelta hacia el sí.
+
+        Ante cualquier otra cosa que no sea el 404 de la bandera (red caída,
+        5xx) se asume que SÍ hay agenda: equivocarse hacia "sí" solo cuesta un
+        intento fallido más adelante, que ya degrada solo; equivocarse hacia
+        "no" apagaría el agendamiento de una instancia que sí lo tiene.
+        """
+        resultado = await self.sondear_agenda()
+        return True if resultado is None else resultado
 
     async def create_booking(
         self, conversation_id: str, start_utc: str
@@ -305,8 +352,7 @@ class CrmClient:
         )
         if resp.status_code == 409:
             raise _booking_conflict(resp)
-        if resp.status_code == 404:
-            raise AgendaUnavailable("este CRM no tiene el motor de agenda encendido")
+        _404_de_agenda(resp, "bookings")
         # El CRM real responde 201 Created (REST); los mocks viejos daban 200.
         if resp.status_code not in (200, 201):
             raise CrmError(f"bookings devolvió {resp.status_code}")
@@ -332,7 +378,7 @@ class CrmClient:
             # Ojo con este 404: puede ser "no hay cita que mover" (agenda
             # encendida) o "aquí no hay agenda". Los distingue el cuerpo: el
             # primero trae el sobre de error del CRM; el segundo viene vacío.
-            if _payload(resp):
+            if not _agenda_apagada(resp):
                 raise CrmConflict("no_booking", _payload(resp))
             raise AgendaUnavailable("este CRM no tiene el motor de agenda encendido")
         if resp.status_code != 200:

@@ -11,22 +11,19 @@ from typing import Any
 
 import asyncpg
 
-from app.state import BotMessage, Conversation, OfferedSlot, PendingSend, RelayItem
+from app.state import (
+    COLUMNAS_DE_CONVERSACION,
+    BotMessage,
+    Conversation,
+    OfferedSlot,
+    PendingSend,
+    RelayItem,
+)
 
 logger = logging.getLogger("nea.db")
 
-_CONV_COLUMNS = frozenset(
-    {
-        "crm_conversation_id",
-        "phase",
-        "greeted",
-        "media_notice_sent",
-        "followup_due_at",
-        "followup_sent",
-        "last_inbound_at",
-        "stalled_at",
-    }
-)
+# La misma lista que usa MemoryStore (ver app/state.py).
+_CONV_COLUMNS = COLUMNAS_DE_CONVERSACION
 
 
 def _conv_from_row(row: asyncpg.Record) -> Conversation:
@@ -43,6 +40,33 @@ def _conv_from_row(row: asyncpg.Record) -> Conversation:
         stalled_at=row["stalled_at"],
         organization_id=row["organization_id"],
         organization_slug=row["organization_slug"],
+    )
+
+
+def _relay_desde_fila(row: Any) -> RelayItem:
+    """Una fila de `relay_queue` → su dataclass.
+
+    `relay_queue` NO tiene columnas de organización, y no le hacen falta: el
+    relay solo existe en el modo de siempre (en cloud el CRM ya tiene el
+    mensaje), y ahí la organización es la única que hay.
+
+    Desde 95549c8 este mapeo leía `organization_id`/`organization_slug` —se
+    copiaron aquí junto con los de `pending_send`— y reventaba con `KeyError`
+    en la primera fila pendiente. `RelayWorker.run` se tragaba la excepción
+    cada 5 s: ningún entrante llegaba a la bandeja del CRM, los estados de
+    entrega no se actualizaban y, con un contacto nuevo, `/api/bot/context`
+    daba 404 y Nea no contestaba. Las pruebas no lo vieron porque usaban
+    `MemoryStore`; ahora `tests/test_pg_store.py` lo corre contra Postgres.
+    """
+    return RelayItem(
+        id=row["id"],
+        body=bytes(row["body"]),
+        signature=row["signature"],
+        attempts=row["attempts"],
+        created_at=row["created_at"],
+        next_retry_at=row["next_retry_at"],
+        delivered_at=row["delivered_at"],
+        abandoned_at=row["abandoned_at"],
     )
 
 
@@ -133,21 +157,7 @@ class PgStore:
             """,
             now,
         )
-        return [
-            RelayItem(
-                id=r["id"],
-                body=bytes(r["body"]),
-                signature=r["signature"],
-                attempts=r["attempts"],
-                created_at=r["created_at"],
-                next_retry_at=r["next_retry_at"],
-                delivered_at=r["delivered_at"],
-                abandoned_at=r["abandoned_at"],
-                organization_id=r["organization_id"],
-                organization_slug=r["organization_slug"],
-            )
-            for r in rows
-        ]
+        return [_relay_desde_fila(r) for r in rows]
 
     async def mark_relay_delivered(self, relay_id: int) -> None:
         await self.pool.execute(

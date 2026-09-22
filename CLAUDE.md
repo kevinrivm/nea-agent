@@ -62,9 +62,12 @@ idempotentes al arranque · httpx (CRM y OpenAI) · pytest + respx · Docker
   red. Si el CRM responde `slot_not_offered`, su lista gana y el espejo se
   resincroniza — no se discute.
 - **La agenda puede no existir.** En Vocero va detrás de la bandera `AGENDA`,
-  apagada por defecto: esos endpoints responden 404. Se sondea al arrancar
-  (`crm.agenda_available()`); sin agenda no se le enseñan al modelo las
-  herramientas de agendar y el prompt se lo dice.
+  apagada por defecto: esos endpoints responden 404 **vacío** (un 404 con el
+  sobre de error del CRM es otra cosa: no existe la conversación o la cita).
+  Se sondea al arrancar y la respuesta caduca cada `AGENDA_PROBE_TTL_SECONDS`
+  (`app/agenda.py`): encender o apagar la bandera en el CRM llega sin
+  reiniciar Nea. Sin agenda no se le enseñan al modelo las herramientas de
+  agendar y el prompt se lo dice.
 
 ## Definición de Hecho
 
