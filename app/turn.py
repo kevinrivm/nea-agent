@@ -315,6 +315,7 @@ async def run_turn(
         offered=offered,
         agenda=ctx.agenda_enabled,
         tz=_agent_tz(settings),
+        recordatorios=bool(getattr(ctx.crm, "supports_agenda_v2", False)),
     )
     # Se traen más mensajes de los que ve el LLM: el candado de cierre cuenta
     # el hilo COMPLETO del lead, no solo la ventana de contexto.

@@ -87,6 +87,11 @@ idempotentes al arranque · httpx (CRM y OpenAI) · pytest + respx · Docker
   (`app/agenda.py`): encender o apagar la bandera en el CRM llega sin
   reiniciar Nea. Sin agenda no se le enseñan al modelo las herramientas de
   agendar y el prompt se lo dice.
+- **No se ofrece lo que no hay con qué hacer.** Los recordatorios de la cita
+  existen solo con la agenda v2 de Vocero Cloud (`supports_agenda_v2`): sin
+  ella, `book_session` no lleva `recordatorios_aceptados` y el prompt dice que
+  no hay recordatorios. Un campo obligatorio en una herramienta es una
+  pregunta que el modelo le va a hacer al lead.
 
 ## Definición de Hecho
 

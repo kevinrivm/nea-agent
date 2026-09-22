@@ -127,16 +127,8 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                             "en vez de reservar."
                         ),
                     },
-                    "recordatorios_aceptados": {
-                        "type": "boolean",
-                        "description": (
-                            "true SOLO si el lead autorizó explícitamente recibir "
-                            "recordatorios de ESTA cita. Reservar o confirmar el "
-                            "horario no implica permiso. Si no lo dijo o lo rechazó, false."
-                        ),
-                    },
                 },
-                "required": ["start_utc", "dia_confirmado", "recordatorios_aceptados"],
+                "required": ["start_utc", "dia_confirmado"],
             },
         },
     },
@@ -200,6 +192,20 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
 ]
 
 
+# Recordatorios de la cita: SOLO los manda la agenda v2 de Vocero Cloud. El
+# CRM raíz no tiene recordatorios, y con este campo obligatorio en su
+# book_session el modelo, para llenarlo, le preguntaba al lead «¿te mando un
+# recordatorio antes de la sesión?» — una promesa que nadie iba a cumplir
+# (e2e contra raíz, escenario 4). Sin la capacidad, el campo no existe.
+RECORDATORIOS_ACEPTADOS = {
+    "type": "boolean",
+    "description": (
+        "true SOLO si el lead autorizó explícitamente recibir "
+        "recordatorios de ESTA cita. Reservar o confirmar el "
+        "horario no implica permiso. Si no lo dijo o lo rechazó, false."
+    ),
+}
+
 AGENDA_V2_SCHEMAS = [
     {"type": "function", "function": {"name": "list_bookings", "description": "Consulta las citas activas de esta conversación. Muestra sus etiquetas y pide elegir y confirmar antes de mover o cancelar. Nunca inventes una selección.", "parameters": {"type": "object", "properties": {}}}},
     {"type": "function", "function": {"name": "cancel_session", "description": "Cancela la cita seleccionada SOLO después de confirmación explícita del cliente. Usa el selectionToken devuelto por list_bookings.", "parameters": {"type": "object", "properties": {"selection_token": {"type": "string"}, "confirmation": {"type": "boolean"}}, "required": ["selection_token", "confirmation"]}}},
@@ -222,6 +228,10 @@ def tool_schemas(agenda_enabled: bool = True, agenda_v2: bool = False, coordinat
             import copy
             schemas = copy.deepcopy(TOOL_SCHEMAS)
             for tool in schemas:
+                if tool["function"]["name"] == "book_session":
+                    params = tool["function"]["parameters"]
+                    params["properties"]["recordatorios_aceptados"] = dict(RECORDATORIOS_ACEPTADOS)
+                    params["required"].append("recordatorios_aceptados")
                 if tool["function"]["name"] == "reschedule_session":
                     params = tool["function"]["parameters"]
                     params["properties"]["selection_token"] = {"type": "string", "description": "Token de list_bookings de la cita elegida y confirmada por el cliente"}
