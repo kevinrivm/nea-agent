@@ -61,6 +61,8 @@ de un `BusinessProfile` que se resuelve en este orden (`app/profile.py`):
 
 ## Arquitectura
 
+En el modo estándar, el de siempre:
+
 ```
 Meta Cloud API ── webhook ──► Nea (este repo)
                                │  1. verifica firma, dedup, encola
@@ -82,8 +84,10 @@ contra Postgres, la cubren las pruebas de `tests/test_pg_store.py` (ver
 Definición de Hecho).
 
 Herramientas del LLM: `update_ficha` (calificación), `propose_slots` /
-`book_session` (agenda), `route_out` (no califica; comparte los recursos
-alternativos del perfil), `handoff` (pausa la IA en el CRM).
+`book_session` / `reschedule_session` (agenda, solo si el CRM agenda),
+`route_out` (no califica; comparte los recursos alternativos del perfil),
+`handoff` (pausa la IA en el CRM). En modo cloud, con la agenda v2 de Vocero
+Cloud, también `list_bookings` y `cancel_session`.
 
 ### Modo cloud (opcional): detrás de un Vocero multitenant
 
@@ -132,19 +136,205 @@ Sin la bandera no cambia nada: el webhook de Meta, el relay y `/api/bot/*`
 siguen siendo los de siempre. Las variables del modo cloud están en
 `.env.example`.
 
-## Quickstart
+## Instalar: Nea delante de Vocero raíz
 
-Requisitos: Python 3.11+, Postgres propio (no el del CRM), una instancia de
-Vocero CRM con el bot gateway habilitado (`BOT_API_KEY`), y una app de Meta
-con WhatsApp Cloud API apuntando su webhook a este servicio.
+Así se instala en el modo estándar, el de siempre (sin `VOCERO_MODE`): Meta le
+manda los webhooks a Nea, Nea le releva cada uno al CRM y conversa por
+`/api/bot/*`. Nea no tiene el token de WhatsApp ni le escribe a Meta: **todo lo
+que el lead recibe sale por `POST {CRM}/api/bot/messages`**, y es el CRM quien
+lo envía y lo deja en la bandeja.
 
-**Si quieres que Nea agende, enciende el motor de agenda de Vocero**
-(`AGENDA=on` en el CRM): viene apagado por defecto. Nea lo detecta al arrancar
-y lo vuelve a preguntar cada minuto (`AGENDA_PROBE_TTL_SECONDS`), así que
-encenderlo no exige reiniciarla — contra un CRM sin agenda no ofrece horarios
-ni promete citas, califica y escala a un humano. La agenda la lleva el CRM:
-Nea le pide los huecos, él registra lo ofrecido y solo acepta reservar uno de
-esos.
+Qué cambia en cada versión y cómo actualizar una Nea que ya corre:
+[`CHANGELOG.md`](CHANGELOG.md).
+
+### 1. Lo que pone el CRM
+
+En las variables de Vocero raíz:
+
+- `BOT_API_KEY` (`openssl rand -hex 32`) abre `/api/bot/*`. La misma va en
+  Nea como `CRM_BOT_API_KEY`.
+- `META_WEBHOOK_VERIFY_TOKEN` es el token del webhook del CRM. Va al final de
+  `CRM_WEBHOOK_URL`.
+- `META_APP_SECRET`, el App Secret de tu app de Meta, igual que en Nea. Nea
+  verifica la firma de Meta y le releva al CRM el payload con la firma
+  intacta, así que el CRM también la verifica.
+- `AGENDA=on` si quieres que Nea agende: viene apagada. Nea lo detecta al
+  arrancar y lo vuelve a preguntar cada minuto (`AGENDA_PROBE_TTL_SECONDS`),
+  así que encenderla no exige reiniciarla. Contra un CRM sin agenda no ofrece
+  horarios ni promete citas: califica y escala a un humano. La agenda la lleva
+  el CRM: Nea le pide los huecos, él registra lo ofrecido y solo acepta
+  reservar uno de esos.
+
+En Coolify, una variable nueva entra con un redeploy, no con un restart.
+
+Y en la app del CRM:
+
+- El número de WhatsApp conectado (Configuración → WhatsApp): es el CRM quien
+  envía.
+- **El agente incluido de Vocero, apagado** (pestaña Agente), o el CRM sin
+  `OPENROUTER_API_TOKEN`. Si contestan los dos, el cliente recibe dos
+  respuestas a cada mensaje.
+
+### 2. Nea desde la imagen
+
+Cada tag `vX.Y.Z` de este repo publica `ghcr.io/kevinrivm/nea-agent:X.Y.Z`
+(además de `X.Y` y `latest`) para `linux/amd64`, con la versión y el commit
+horneados para `/health` (`.github/workflows/imagen.yml`). Fija la etiqueta
+exacta, nunca `latest`:
+
+```bash
+docker pull ghcr.io/kevinrivm/nea-agent:1.0.0
+```
+
+La imagen aplica las migraciones al arrancar (`migrations/*.sql`: son
+idempotentes y corren todas en cada arranque) y trae su HEALTHCHECK:
+`GET /health` en el puerto 8000, cada 30 s.
+
+En Coolify, dentro del proyecto del CRM:
+
+1. Un **PostgreSQL** para Nea, aparte del del CRM (el CI prueba contra el 16).
+2. **+ New → Docker Image**: `ghcr.io/kevinrivm/nea-agent`, etiqueta `1.0.0`,
+   puerto `8000` y un dominio con https: Meta tiene que alcanzarlo.
+3. Las variables mínimas de abajo, y deploy.
+
+No pongas `NEA_VERSION` en las variables: pisaría la de la imagen. Deja `PORT`
+en 8000: el HEALTHCHECK siempre pregunta a ese puerto. Y no dejes dos Nea
+contra la misma base: cada una reenviaría por su cuenta lo pendiente.
+
+¿Un fork u otra arquitectura? Construye tu imagen con los mismos build args;
+sin ellos, `/health` dice `"version": "dev"`:
+
+```bash
+docker build --build-arg NEA_VERSION=1.0.0 \
+  --build-arg SOURCE_COMMIT=$(git rev-parse HEAD) -t nea-agent:1.0.0 .
+```
+
+O deja que la construya GitHub: con Actions encendido en tu fork, un tag
+`vX.Y.Z` publica `ghcr.io/<tu-usuario>/nea-agent:X.Y.Z`. GitHub crea ese
+paquete como privado: hazlo público (Package settings → Change visibility) o
+dale a tu servidor credenciales del registro, o Coolify no podrá descargarlo.
+
+### 3. Variables mínimas
+
+| Variable | Qué va | Si falta |
+|---|---|---|
+| `DATABASE_URL` | El Postgres de Nea: `postgresql://usuario:clave@host:5432/nea` | Nea no arranca |
+| `VERIFY_TOKEN` | Un token que inventas tú. El mismo va en el override del webhook | Meta no puede verificar el webhook: `GET /webhook` da 403 |
+| `META_APP_SECRET` | El App Secret de tu app de Meta, el mismo del CRM | No se verifica la firma: cualquiera puede postear al webhook. Solo para desarrollo |
+| `CRM_BASE_URL` | `https://crm.tu-negocio.com`, sin `/` al final | Apunta a `http://localhost:3000` |
+| `CRM_WEBHOOK_URL` | `https://crm.tu-negocio.com/api/webhooks/wa/<META_WEBHOOK_VERIFY_TOKEN del CRM>` | El relay no entrega nada: el CRM no ve los mensajes y a un contacto nuevo Nea no le contesta |
+| `CRM_BOT_API_KEY` | El `BOT_API_KEY` del CRM | El CRM contesta 401 y Nea no le contesta a nadie |
+| `LLM_API_KEY` | La llave del proveedor del modelo | Nea no arranca |
+| `LLM_BASE_URL` | Con OpenRouter, `https://openrouter.ai/api/v1` | OpenAI |
+| `LLM_MODEL` | Un modelo rápido que use herramientas. En OpenRouter lleva prefijo: `z-ai/glm-5.3-flash` | `gpt-4o-mini` |
+| `LLM_TRANSCRIBE_MODEL` | El que oye las notas de voz. Fuera de OpenAI, uno que acepte audio: `google/gemini-2.5-flash` | `whisper-1`, que solo existe en OpenAI: con otro proveedor falla toda nota de voz |
+| `ALLOWED_WA_IDS` | Mientras pruebas, tu número (`5215512345678`) | Nea le contesta a todos |
+
+`VOCERO_MODE` se queda vacía: eso es el modo estándar. Lo demás (zona horaria,
+candado de cierre, reintentos, tiempos) tiene default y está explicado en
+[`.env.example`](.env.example). Los nombres viejos `OPENAI_*` siguen
+funcionando.
+
+### 4. El webhook de Meta, a Nea
+
+Nea recibe a Meta en `https://nea.tu-dominio.com/webhook`: `GET` para la
+verificación (con tu `VERIFY_TOKEN`) y `POST` para los eventos (con
+`META_APP_SECRET` puesto, una firma inválida o ausente da 401).
+
+Apúntalo con un **override a nivel del número de teléfono**. Meta busca a
+dónde mandar cada webhook en este orden: el override del número, el de la WABA
+y, al final, la URL de callback de la app. El del número gana, y nada del CRM
+lo toca.
+
+```http
+POST https://graph.facebook.com/v25.0/{PHONE_NUMBER_ID}
+Authorization: Bearer {TOKEN_DE_WHATSAPP}
+Content-Type: application/json
+
+{"webhook_configuration": {"override_callback_uri": "https://nea.tu-dominio.com/webhook",
+                           "verify_token": "{VERIFY_TOKEN de Nea}"}}
+```
+
+Antes de mandarlo:
+
+- Nea arriba y contestando `GET /webhook` con ese mismo token: Meta verifica
+  la URL.
+- La app suscrita a la WABA (`GET /{WABA_ID}/subscribed_apps` no viene vacío)
+  y el campo `messages` suscrito en la app de Meta (App Dashboard → Webhooks).
+  El override cambia a dónde llegan los webhooks, no hace que existan.
+- El token con el permiso `whatsapp_business_management`, y la URL de 200
+  caracteres o menos.
+
+Que el POST conteste bien no basta. Reléelo:
+
+```http
+GET https://graph.facebook.com/v25.0/{PHONE_NUMBER_ID}?fields=webhook_configuration
+```
+
+`webhook_configuration.phone_number` tiene que ser la URL de Nea;
+`whatsapp_business_account` y `application` son los de respaldo. Para quitarlo,
+el mismo POST con `"override_callback_uri": ""`: los webhooks vuelven al
+override de la WABA (en una instalación de Vocero, el CRM) o, si no hay, al
+callback de la app. Las plantillas no siguen ningún override: sus eventos van
+siempre al callback de la app.
+
+**La trampa: `POST /{WABA_ID}/subscribed_apps` sin cuerpo.** Así documenta Meta
+cómo se *borra* el override de la WABA. Vocero raíz hasta 1.3.0 hace esa
+llamada cada vez que guardas la conexión en Configuración → WhatsApp (también
+al cambiar el token): si Nea estaba en la WABA, deja de recibir sin ningún
+aviso. Desde 1.4.0 el CRM primero consulta y respeta un override que ya exista,
+pero si esa consulta falla, re-suscribe igual. El override del número no se
+toca con esa llamada: por eso Nea va ahí.
+
+### 5. Comprobar
+
+- `GET https://nea.tu-dominio.com/health` responde 200 con
+  `"version": "1.0.0"`, `"mode": "estándar"` y `relay.pendientes` en 0
+  (detalle en [`/health`](#health)).
+- Escríbele al número desde uno de `ALLOWED_WA_IDS`: tu mensaje aparece en la
+  bandeja del CRM y la respuesta de Nea sale desde ahí.
+- Para atender a todos, vacía `ALLOWED_WA_IDS` y redespliega. Es decisión del
+  dueño del negocio.
+
+## `/health`
+
+`GET /health` responde 200 mientras la base conteste y 503 si no. Solo la base
+decide el código: es lo que mira el HEALTHCHECK de la imagen, y una cola
+atrasada no se arregla reiniciando el contenedor. No lleva secretos ni URLs.
+
+```json
+{"status": "ok", "db": "ok", "version": "1.0.0", "commit": "a1b2c3d",
+ "commitVerified": true, "mode": "estándar",
+ "relay": {"pendientes": 0, "masViejoSegundos": null, "ultimoErrorEn": null}}
+```
+
+| Campo | Qué dice |
+|---|---|
+| `status` | `ok`, o `degraded` con 503 si la base no contesta |
+| `db` | `ok` o `error` |
+| `version` | La versión horneada en la imagen (`NEA_VERSION`). `dev` si se construyó sin ella |
+| `commit` | Los primeros 7 caracteres del commit. Solo aparece si se conoce |
+| `commitVerified` | `true` si el commit salió del build; `false` si es el `SOURCE_COMMIT` que la plataforma puso en el entorno al arrancar, que puede estar desfasado |
+| `mode` | `estándar`, `cloud` o `multiorg`, con acento |
+| `relay` | Solo en modo estándar: en cloud el CRM ya tiene el mensaje. `null` si no se pudo leer la cola, y el código sigue en 200 |
+| `relay.pendientes` | Webhooks de Meta que todavía no llegan al CRM |
+| `relay.masViejoSegundos` | Cuántos segundos lleva esperando el más viejo. `null` si no hay pendientes |
+| `relay.ultimoErrorEn` | La última vez que falló una entrega al CRM (ISO 8601, UTC). No se borra cuando la cola se vacía |
+
+Si `pendientes` no baja y `ultimoErrorEn` es reciente, el relay no llega al
+CRM: revisa `CRM_WEBHOOK_URL` (dominio y token), que el CRM esté arriba y que
+su `META_APP_SECRET` sea el de tu app. Cada webhook se reintenta hasta 24 h;
+después se abandona y deja de contar.
+
+Vocero raíz 1.4.0 lee este `/health` para su tarjeta «Quién responde a tus
+clientes» (pantalla Agente) si el CRM tiene `BRAIN_HEALTH_URL` con la
+dirección interna de Nea, p. ej. `http://nea:8000/health` con el alias de red
+de Coolify. Ahí se ve «Nea · en línea · v1.0.0 · modo estándar · 0 mensajes
+por relevar», y un aviso rojo si el agente incluido del CRM también contesta.
+
+## Desarrollo local
+
+Requisitos: Python 3.11+, un Postgres propio y un Vocero CRM con lo del paso 1.
 
 ```bash
 git clone https://github.com/kevinrivm/nea-agent && cd nea-agent
@@ -154,31 +344,7 @@ cp .env.example .env                            # llena los REEMPLAZA_...
 uvicorn app.main:app --port 8000                # migraciones corren al arranque
 ```
 
-Salud: `GET /health` responde 200 mientras la base conteste (503 si no), con
-qué Nea es y cómo le va al relay:
-
-```json
-{"status": "ok", "db": "ok", "version": "1.4.0", "commit": "9f03997",
- "commitVerified": true, "mode": "estándar",
- "relay": {"pendientes": 0, "masViejoSegundos": null, "ultimoErrorEn": null}}
-```
-
-`mode` es `estándar`, `cloud` o `multiorg`, y `relay` solo aparece en el modo
-de siempre (en cloud el CRM ya tiene el mensaje). `commit` va con
-`commitVerified: true` solo si salió del build; el `SOURCE_COMMIT` que la
-plataforma ponga en el entorno al arrancar viaja con `commitVerified: false`,
-porque puede estar desfasado. Una cola atrasada no cambia el código HTTP: no
-se arregla reiniciando el contenedor.
-
 El webhook de Meta va a `GET|POST /webhook` con tu `VERIFY_TOKEN`.
-
-### Docker / Coolify
-
-El `Dockerfile` está listo para producción (healthcheck incluido). En Coolify:
-app desde este repo + un Postgres, variables del `.env.example` en el runtime,
-y el dominio del webhook hacia el puerto 8000. Para que `/health` diga qué
-versión corre, pasa los build args `NEA_VERSION` y `SOURCE_COMMIT`
-(`docker build --build-arg SOURCE_COMMIT=$(git rev-parse HEAD) …`).
 
 ### Probar en seco
 
@@ -275,7 +441,8 @@ Los NUNCA del chasis en `app/prompt.py` no se relajan sin re-correr esa
 verificación de comportamiento.
 
 ```bash
-pytest -q          # 467 tests: 430 offline + 37 de PgStore, que se saltan sin Postgres
+pip install -r requirements-dev.txt   # pytest, respx y compañía, con versión exacta
+pytest -q          # 496 tests: 457 offline + 39 de PgStore, que se saltan sin Postgres
 ```
 
 Las de `tests/test_pg_store.py` corren `PgStore` contra un Postgres de verdad
