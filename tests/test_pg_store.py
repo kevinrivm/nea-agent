@@ -352,6 +352,36 @@ async def test_el_worker_abandona_lo_de_mas_de_24_h(store, respx_mock):
     assert fila["abandoned_at"] is not None
 
 
+async def test_un_barrido_vacia_la_cola_atrasada_entera(store, respx_mock):
+    """La cola que dejó el relay roto: miles de webhooks viejos delante de los
+    nuevos. De a 50 por barrido (cada 5 s), los mensajes nuevos esperaban
+    detrás; un barrido tiene que abandonar los viejos y entregar los nuevos."""
+    crm = respx_mock.post(CRM_WEBHOOK_URL).mock(return_value=httpx.Response(200))
+    viejos = [await store.enqueue_relay(b'{"viejo":1}', None) for _ in range(120)]
+    nuevos = [await store.enqueue_relay(b'{"nuevo":1}', None) for _ in range(7)]
+    await store.pool.execute(
+        "UPDATE relay_queue SET created_at = now() - interval '3 days' WHERE id = ANY($1::bigint[])",
+        viejos,
+    )
+
+    worker = RelayWorker(store, CRM_WEBHOOK_URL, asyncio.Event())
+    try:
+        await worker.process_due(now=await _ahora(store))
+    finally:
+        await worker.aclose()
+
+    assert crm.call_count == len(nuevos)  # los viejos ni se intentan
+    conteo = await store.pool.fetchrow(
+        """
+        SELECT count(*) FILTER (WHERE abandoned_at IS NOT NULL) AS abandonados,
+               count(*) FILTER (WHERE delivered_at IS NOT NULL) AS entregados
+        FROM relay_queue
+        """
+    )
+    assert (conteo["abandonados"], conteo["entregados"]) == (120, 7)
+    assert await store.due_relays(await _ahora(store)) == []
+
+
 def _estados_de_meta() -> bytes:
     """Un POST de Meta que solo trae estados de entrega: relay y nada más."""
     return json.dumps(

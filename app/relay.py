@@ -48,28 +48,47 @@ class RelayWorker:
                 logger.exception("relay: fallo procesando la cola")
 
     async def process_due(self, now: datetime | None = None) -> None:
+        """Un barrido: TODO lo que vence a `now`, no solo la primera tanda.
+
+        `due_relays` devuelve de a 50 (los más viejos primero). Con un solo
+        lote por barrido, una cola atrasada —la que dejó el relay roto de
+        95549c8: cada webhook de Meta desde el 31-ago— se vaciaba a 50 filas
+        cada 5 s, y los mensajes nuevos esperaban detrás de miles de filas
+        viejas (que solo se abandonan). Ahora el barrido sigue pidiendo lotes
+        hasta que no quede nada vencido que no haya visto ya: lo que falla se
+        reprograma al futuro y no vuelve en este mismo barrido.
+        """
         now = now or utcnow()
-        for item in await self._store.due_relays(now):
-            if now - item.created_at > self.MAX_AGE:
-                logger.error(
-                    "relay: item %d agotó las 24 h sin entregar — abandonado", item.id
-                )
-                await self._store.mark_relay_abandoned(item.id)
-                continue
-            if await self._deliver(item):
-                await self._store.mark_relay_delivered(item.id)
-            else:
-                attempts = item.attempts + 1
-                delay = min(2.0**attempts, self.BACKOFF_CAP)
-                logger.warning(
-                    "relay: item %d falló (intento %d), reintento en %.0f s",
-                    item.id,
-                    attempts,
-                    delay,
-                )
-                await self._store.reschedule_relay(
-                    item.id, attempts, now + timedelta(seconds=delay)
-                )
+        vistos: set[int] = set()
+        while True:
+            lote = [i for i in await self._store.due_relays(now) if i.id not in vistos]
+            if not lote:
+                return
+            for item in lote:
+                vistos.add(item.id)
+                await self._process_item(item, now)
+
+    async def _process_item(self, item: RelayItem, now: datetime) -> None:
+        if now - item.created_at > self.MAX_AGE:
+            logger.error(
+                "relay: item %d agotó las 24 h sin entregar — abandonado", item.id
+            )
+            await self._store.mark_relay_abandoned(item.id)
+            return
+        if await self._deliver(item):
+            await self._store.mark_relay_delivered(item.id)
+        else:
+            attempts = item.attempts + 1
+            delay = min(2.0**attempts, self.BACKOFF_CAP)
+            logger.warning(
+                "relay: item %d falló (intento %d), reintento en %.0f s",
+                item.id,
+                attempts,
+                delay,
+            )
+            await self._store.reschedule_relay(
+                item.id, attempts, now + timedelta(seconds=delay)
+            )
 
     async def _deliver(self, item: RelayItem) -> bool:
         headers = {"content-type": "application/json"}

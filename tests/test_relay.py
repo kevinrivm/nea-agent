@@ -71,6 +71,49 @@ async def test_relay_abandona_tras_24h(ctx, respx_mock):
     await worker.aclose()
 
 
+class _StoreEnLotes:
+    """Devuelve la cola de a 3, como PgStore la devuelve de a 50."""
+
+    def __init__(self, store) -> None:
+        self._store = store
+
+    def __getattr__(self, nombre):
+        return getattr(self._store, nombre)
+
+    async def due_relays(self, now):
+        return (await self._store.due_relays(now))[:3]
+
+
+async def test_un_barrido_no_se_queda_en_el_primer_lote(ctx, respx_mock):
+    """Con una cola atrasada, los mensajes nuevos no esperan detrás de los viejos."""
+    route = respx_mock.post(CRM_WEBHOOK_URL).mock(return_value=httpx.Response(200))
+    viejos = [await ctx.store.enqueue_relay(b"{}", None) for _ in range(7)]
+    for rid in viejos:
+        ctx.store.relays[rid].created_at = utcnow() - timedelta(days=3)
+    nuevo = await ctx.store.enqueue_relay(b'{"nuevo":1}', None)
+
+    worker = RelayWorker(_StoreEnLotes(ctx.store), CRM_WEBHOOK_URL, asyncio.Event())
+    await worker.process_due()
+
+    assert route.call_count == 1
+    assert ctx.store.relays[nuevo].delivered_at is not None
+    assert all(ctx.store.relays[r].abandoned_at is not None for r in viejos)
+    await worker.aclose()
+
+
+async def test_un_barrido_con_el_crm_caido_intenta_cada_uno_una_vez(ctx, respx_mock):
+    """Lo que falla se reprograma al futuro: el barrido termina, no da vueltas."""
+    route = respx_mock.post(CRM_WEBHOOK_URL).mock(return_value=httpx.Response(503))
+    ids = [await ctx.store.enqueue_relay(b"{}", None) for _ in range(8)]
+
+    worker = RelayWorker(_StoreEnLotes(ctx.store), CRM_WEBHOOK_URL, asyncio.Event())
+    await worker.process_due()
+
+    assert route.call_count == 8
+    assert all(ctx.store.relays[r].attempts == 1 for r in ids)
+    await worker.aclose()
+
+
 async def test_relay_sin_firma_no_manda_header(ctx, respx_mock):
     route = respx_mock.post(CRM_WEBHOOK_URL).mock(return_value=httpx.Response(200))
     await ctx.store.enqueue_relay(b'{"x":1}', None)
