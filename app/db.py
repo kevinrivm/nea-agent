@@ -11,22 +11,19 @@ from typing import Any
 
 import asyncpg
 
-from app.state import BotMessage, Conversation, OfferedSlot, PendingSend, RelayItem
+from app.state import (
+    COLUMNAS_DE_CONVERSACION,
+    BotMessage,
+    Conversation,
+    OfferedSlot,
+    PendingSend,
+    RelayItem,
+)
 
 logger = logging.getLogger("nea.db")
 
-_CONV_COLUMNS = frozenset(
-    {
-        "crm_conversation_id",
-        "phase",
-        "greeted",
-        "media_notice_sent",
-        "followup_due_at",
-        "followup_sent",
-        "last_inbound_at",
-        "stalled_at",
-    }
-)
+# La misma lista que usa MemoryStore (ver app/state.py).
+_CONV_COLUMNS = COLUMNAS_DE_CONVERSACION
 
 
 def _conv_from_row(row: asyncpg.Record) -> Conversation:

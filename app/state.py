@@ -20,6 +20,25 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# Lo único que `update_conversation` puede tocar. Vive aquí y no en db.py para
+# que MemoryStore rechace exactamente lo mismo que Postgres: si aceptara
+# cualquier campo, un nombre mal escrito pasaría todas las pruebas y reventaría
+# el turno en producción — la misma distancia entre pruebas y base de verdad
+# que escondió el fallo del relay.
+COLUMNAS_DE_CONVERSACION = frozenset(
+    {
+        "crm_conversation_id",
+        "phase",
+        "greeted",
+        "media_notice_sent",
+        "followup_due_at",
+        "followup_sent",
+        "last_inbound_at",
+        "stalled_at",
+    }
+)
+
+
 # ---------------------------------------------------------------- modelos ---
 
 
@@ -261,7 +280,11 @@ class MemoryStore:
         clave = (organization_id, wa_identity)
         cid = self._conv_by_identity.get(clave)
         if cid is not None:
-            return self.conversations[cid]
+            conv = self.conversations[cid]
+            # Igual que el ON CONFLICT de PgStore: el slug se refresca, porque
+            # un miembro puede renombrar su subdominio y el id no cambia.
+            conv.organization_slug = organization_slug
+            return conv
         cid = next(self._ids)
         conv = Conversation(
             id=cid,
@@ -274,6 +297,11 @@ class MemoryStore:
         return conv
 
     async def update_conversation(self, conversation_id: int, **fields: Any) -> None:
+        desconocidas = set(fields) - COLUMNAS_DE_CONVERSACION
+        if desconocidas:
+            raise ValueError(
+                f"columnas desconocidas en update_conversation: {desconocidas}"
+            )
         conv = self.conversations[conversation_id]
         for key, value in fields.items():
             setattr(conv, key, value)
