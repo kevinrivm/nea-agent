@@ -225,6 +225,16 @@ class CrmSinOrganizacion:
         """
         return True
 
+    async def sondear_agenda(self, timeout: float | None = None) -> bool | None:
+        """Lo mismo, para la sonda con caducidad (app/agenda.py).
+
+        True y no None a propósito: con None la sonda se quedaría con lo
+        último que supo, y tras un 404 de la bandera eso sería «apagada» para
+        siempre. Con True, al vencer el TTL se vuelve a intentar con el primer
+        turno que llegue, que es el que de verdad pregunta con credencial.
+        """
+        return True
+
     async def aclose(self) -> None:
         return None
 

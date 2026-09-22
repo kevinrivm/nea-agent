@@ -569,9 +569,22 @@ class ToolRuntime:
         return chosen, None
 
     def _sin_agenda(self) -> dict[str, Any]:
-        """Este CRM no tiene agenda: dejar de prometer citas, no reintentar."""
+        """Este CRM no tiene agenda: dejar de prometer citas, no reintentar.
+
+        No es para siempre. La bandera AGENDA se enciende y se apaga en el CRM
+        sin avisarle a Nea: se apaga en este turno y en la sonda, que vuelve a
+        preguntar cuando vence su TTL (app/agenda.py). Antes se quedaba
+        apagada hasta reiniciar el proceso. Solo llega aquí el 404 VACÍO de la
+        bandera; el que trae el sobre de error del CRM es un fallo normal de
+        la petición (ver `_agenda_apagada` en app/crm.py).
+        """
         self._ctx.agenda_enabled = False
-        logger.info("tools: el CRM no expone agenda — agendamiento desactivado")
+        sonda = getattr(self._ctx, "agenda_sonda", None)
+        if sonda is not None:
+            sonda.marcar_apagada()
+        logger.info(
+            "tools: el CRM no expone agenda — agendamiento desactivado hasta la próxima sonda"
+        )
         return {
             "ok": False,
             "error": "sin_agenda",

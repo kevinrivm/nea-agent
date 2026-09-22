@@ -17,6 +17,7 @@ from typing import AsyncIterator
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from app.agenda import SondaDeAgenda
 from app.coalesce import Coalescer
 from app.config import Settings
 from app.crm import CrmClient
@@ -137,14 +138,20 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
 
         if own_resources:
             # ¿Este CRM agenda? Vocero trae el motor detrás de una bandera de
-            # despliegue y viene apagado por defecto. Se pregunta una vez, aquí,
-            # en vez de descubrirlo lead por lead: así el primero que escriba ya
-            # recibe el comportamiento correcto en vez de una promesa de cita
-            # que no se puede cumplir.
-            c.agenda_enabled = await c.crm.agenda_available()
+            # despliegue y viene apagado por defecto. Se pregunta aquí, en vez
+            # de descubrirlo lead por lead, para que el primero que escriba ya
+            # reciba el comportamiento correcto en vez de una promesa de cita
+            # que no se puede cumplir. Y la respuesta caduca: los turnos la
+            # vuelven a pedir cada AGENDA_PROBE_TTL_SECONDS (app/agenda.py),
+            # así que encender AGENDA en el CRM ya no exige reiniciar Nea.
+            c.agenda_sonda = SondaDeAgenda(
+                c.crm, ttl=c.settings.agenda_probe_ttl_seconds
+            )
+            c.agenda_enabled = await c.agenda_sonda.vigente()
             logger.info(
-                "agenda del CRM: %s",
+                "agenda del CRM: %s (se vuelve a preguntar cada %.0f s)",
                 "disponible" if c.agenda_enabled else "APAGADA — Nea no ofrecerá citas",
+                c.agenda_sonda.ttl,
             )
 
         relay_worker = RelayWorker(c.store, c.settings.crm_webhook_url, c.relay_wake)

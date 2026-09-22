@@ -17,6 +17,7 @@ from typing import Any, AsyncIterator
 from zoneinfo import ZoneInfo
 
 from app import media
+from app.agenda import agenda_vigente
 from app.config import canonical_identity
 from app.crm import CrmConflict, CrmError
 from app.hostility import ALERT as HOSTILITY_ALERT, hostile_streak
@@ -285,6 +286,10 @@ async def run_turn(
     )
 
     # --- Armar mensajes para el LLM ---------------------------------------
+    # ¿El CRM agenda HOY? La respuesta caduca (app/agenda.py): si venció, este
+    # turno la vuelve a pedir, con timeout corto. Así encender AGENDA en el
+    # CRM llega sin reiniciar Nea, y un 404 de la bandera no apaga para siempre.
+    ctx.agenda_enabled = await agenda_vigente(ctx)
     referral = next((m.referral_headline for m in inbound if m.referral_headline), None)
     offered = await ctx.store.get_offered_slots(conv.id)
     profile = await resolve_profile(ctx)

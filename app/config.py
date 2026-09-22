@@ -138,6 +138,13 @@ class Settings(BaseSettings):
 
     history_window: int = 10
 
+    # Cada cuántos segundos, como mucho, se le vuelve a preguntar al CRM si
+    # agenda (la bandera AGENDA de Vocero). Antes se preguntaba solo al
+    # arrancar: encenderla exigía reiniciar Nea. La pregunta la hace el primer
+    # turno que llega con la respuesta vencida, con timeout corto; si el CRM no
+    # contesta, se queda la última respuesta. 0 = en cada turno.
+    agenda_probe_ttl_seconds: float = Field(default=60.0, ge=0)
+
     # Guardarraíles y tiempos
     allowed_wa_ids: str = ""
     # Identidades que pueden usar el comando /reset. Va SEPARADA de

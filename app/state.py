@@ -439,10 +439,15 @@ class AppContext:
     coalescer: Any | None = None
     relay_wake: asyncio.Event = field(default_factory=asyncio.Event)
     # ¿El CRM de esta instancia tiene motor de agenda? Vocero lo trae detrás de
-    # una bandera de despliegue y viene apagado por defecto. Se resuelve al
-    # arrancar (y se corrige solo si en caliente resulta que no está), para no
+    # una bandera de despliegue y viene apagado por defecto. Es lo que vale en
+    # el turno en curso: el turno lo refresca al empezar desde `agenda_sonda`
+    # (y una herramienta lo apaga si choca con el 404 de la bandera), para no
     # ofrecerle horarios a un lead contra un CRM que no puede agendarlos.
     agenda_enabled: bool = True
+    # La respuesta del CRM con caducidad (app/agenda.py): encender o apagar
+    # AGENDA allá llega sin reiniciar Nea. None = sin sonda (pruebas que fijan
+    # `agenda_enabled` a mano).
+    agenda_sonda: Any | None = None
     # Un candado por identidad: los turnos de UNA conversación se serializan.
     # Sin esto, una ráfaga que llega mientras el turno anterior sigue en vuelo
     # abre un segundo turno con contexto viejo (se reservó una cita antes de
