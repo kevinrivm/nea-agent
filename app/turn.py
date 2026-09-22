@@ -20,6 +20,7 @@ from app import media
 from app.agenda import agenda_vigente
 from app.config import canonical_identity
 from app.crm import CrmConflict, CrmError
+from app.formato import a_whatsapp
 from app.hostility import ALERT as HOSTILITY_ALERT, hostile_streak
 from app.llm import LlmExhausted
 from app.stall import ALERTA as STALL_ALERT, racha_vacia, sin_rumbo
@@ -377,9 +378,13 @@ async def run_turn(
         runtime.handoff_reason = "hostilidad"
 
     # --- Enviar la respuesta (SIEMPRE vía el CRM, nunca Meta directo) -----
+    # WhatsApp no pinta Markdown: se convierte aquí, y lo que se guarda en el
+    # historial es lo ya convertido para que el modelo no aprenda de vuelta
+    # el formato que el lead ve roto (app/formato.py).
     sent = False
     if final_text and final_text.strip():
-        final_text = runtime.finalize_reply(final_text.strip())
+        final_text = a_whatsapp(runtime.finalize_reply(final_text.strip()))
+    if final_text and final_text.strip():
         sent = await _send(ctx, conv.id, str(crm_conv_id), final_text)
         if sent:
             await ctx.store.add_message(conv.id, "assistant", final_text)
@@ -471,12 +476,18 @@ def _respuesta_invalida(texto: str | None, previos: list[str]) -> str | None:
     """
     if not texto or not texto.strip():
         return None
-    plano = " ".join(texto.split())
+    # Se compara lo que el lead VERÍA: ya convertido a WhatsApp. Así un enlace
+    # de Markdown suelto («[Agenda](https://…)») no pasa por nota entre
+    # corchetes, y una repetición no se escapa por traer otras negritas que
+    # el mensaje ya guardado (que se guardó convertido).
+    plano = " ".join(a_whatsapp(texto).split())
     if re.fullmatch(r"[(\[].*[)\]]", plano):
         return "era una nota interna entre paréntesis"
     # Un «¡Va!» o un «Perfecto 👍» pueden repetirse sin que nadie lo note; un
     # mensaje con contenido repetido entero, no.
-    if len(plano) >= REPETICION_MIN and any(plano == " ".join(p.split()) for p in previos):
+    if len(plano) >= REPETICION_MIN and any(
+        plano == " ".join(a_whatsapp(p).split()) for p in previos
+    ):
         return "repetía palabra por palabra un mensaje que ya le enviaste"
     return None
 
