@@ -18,6 +18,7 @@ from app.state import (
     OfferedSlot,
     PendingSend,
     RelayItem,
+    RelayStats,
 )
 
 logger = logging.getLogger("nea.db")
@@ -38,6 +39,7 @@ def _conv_from_row(row: asyncpg.Record) -> Conversation:
         followup_sent=row["followup_sent"],
         last_inbound_at=row["last_inbound_at"],
         stalled_at=row["stalled_at"],
+        stall_since_message_id=row["stall_since_message_id"],
         organization_id=row["organization_id"],
         organization_slug=row["organization_slug"],
     )
@@ -67,6 +69,7 @@ def _relay_desde_fila(row: Any) -> RelayItem:
         next_retry_at=row["next_retry_at"],
         delivered_at=row["delivered_at"],
         abandoned_at=row["abandoned_at"],
+        last_error_at=row["last_error_at"],
     )
 
 
@@ -173,10 +176,39 @@ class PgStore:
         self, relay_id: int, attempts: int, next_retry_at: datetime
     ) -> None:
         await self.pool.execute(
-            "UPDATE relay_queue SET attempts = $2, next_retry_at = $3 WHERE id = $1",
+            # Solo se reprograma tras una entrega fallida: es el último error.
+            """
+            UPDATE relay_queue
+            SET attempts = $2, next_retry_at = $3, last_error_at = now()
+            WHERE id = $1
+            """,
             relay_id,
             attempts,
             next_retry_at,
+        )
+
+    async def relay_stats(self) -> RelayStats:
+        # Los dos índices parciales (el de la cola y el de 007) dejan contestar
+        # sin recorrer la tabla, que no se purga: /health corre cada 30 s. La
+        # edad se calcula con el reloj de Postgres, el mismo de `created_at`.
+        row = await self.pool.fetchrow(
+            """
+            SELECT
+              count(*) AS pendientes,
+              floor(EXTRACT(EPOCH FROM now() - min(created_at)))::bigint
+                AS mas_viejo_segundos,
+              (SELECT max(last_error_at) FROM relay_queue
+                WHERE last_error_at IS NOT NULL) AS ultimo_error_en
+            FROM relay_queue
+            WHERE delivered_at IS NULL AND abandoned_at IS NULL
+            """
+        )
+        assert row is not None
+        edad = row["mas_viejo_segundos"]
+        return RelayStats(
+            pendientes=row["pendientes"],
+            mas_viejo_segundos=max(0, int(edad)) if edad is not None else None,
+            ultimo_error_en=row["ultimo_error_en"],
         )
 
     # ----------------------------------------------------- conversaciones ---

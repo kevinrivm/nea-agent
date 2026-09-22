@@ -14,6 +14,7 @@ from datetime import datetime
 from typing import Any
 
 from app.crm import CrmConflict, CrmError
+from app.formato import a_whatsapp
 from app.llm import LlmExhausted
 from app.profile import resolve_profile
 from app.prompt import FOLLOWUP_INSTRUCTION, build_system_prompt
@@ -164,7 +165,9 @@ class FollowupWorker:
         except LlmExhausted as exc:
             logger.warning("followup %s: LLM agotado (%s) — omitido", conv.wa_identity, exc)
             return
-        text = (reply.content or "").strip()
+        # Igual que el turno: WhatsApp no pinta Markdown (app/formato.py), y
+        # el historial guarda lo que el lead de verdad recibió.
+        text = a_whatsapp((reply.content or "").strip())
         if not text:
             logger.warning("followup %s: LLM sin texto — omitido", conv.wa_identity)
             return

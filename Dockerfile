@@ -12,6 +12,18 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app ./app
 COPY migrations ./migrations
 
+# Qué versión corre, para /health (app/version.py). Van después del
+# `pip install` para no invalidar su caché en cada commit. El commit se
+# guarda en NEA_BUILD_COMMIT y no en SOURCE_COMMIT a propósito: la
+# plataforma puede poner SOURCE_COMMIT en el entorno al arrancar y lo
+# pisaría, y /health ya no sabría si salió del build (verificado) o no.
+#   docker build --build-arg NEA_VERSION=1.4.0 \
+#     --build-arg SOURCE_COMMIT=$(git rev-parse HEAD) .
+ARG NEA_VERSION=dev
+ARG SOURCE_COMMIT=
+ENV NEA_VERSION=${NEA_VERSION} \
+    NEA_BUILD_COMMIT=${SOURCE_COMMIT}
+
 EXPOSE 8000
 
 # Las migraciones se aplican al arranque (lifespan de app/main.py).

@@ -35,6 +35,7 @@ COLUMNAS_DE_CONVERSACION = frozenset(
         "followup_sent",
         "last_inbound_at",
         "stalled_at",
+        "stall_since_message_id",
     }
 )
 
@@ -62,8 +63,11 @@ class Conversation:
     followup_sent: bool = False
     last_inbound_at: datetime | None = None
     # Puesta cuando el agente cierra por conversación sin rumbo: mientras
-    # viva, el turno guarda silencio (ver app/stall.py).
+    # viva, el relleno se contesta con silencio (ver app/stall.py).
     stalled_at: datetime | None = None
+    # El candado cuenta solo los mensajes con id mayor a este: se mueve al
+    # reabrir, para que el hilo viejo no vuelva a disparar el cierre.
+    stall_since_message_id: int = 0
 
 
 @dataclass
@@ -95,6 +99,17 @@ class RelayItem:
     next_retry_at: datetime
     delivered_at: datetime | None = None
     abandoned_at: datetime | None = None
+    # La última entrega fallida de esta fila (007). La lee /health.
+    last_error_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class RelayStats:
+    """Cómo va la cola del relay, para /health (solo modo de siempre)."""
+
+    pendientes: int  # ni entregados ni abandonados
+    mas_viejo_segundos: int | None  # edad del pendiente más viejo
+    ultimo_error_en: datetime | None  # la entrega fallida más reciente
 
 
 @dataclass
@@ -216,6 +231,7 @@ class Store(Protocol):
         """Marca followup_sent=True atómicamente. True si ESTA llamada lo ganó."""
         ...
 
+    async def relay_stats(self) -> RelayStats: ...
     async def ping(self) -> None: ...
     async def aclose(self) -> None: ...
 
@@ -270,6 +286,24 @@ class MemoryStore:
         item = self.relays[relay_id]
         item.attempts = attempts
         item.next_retry_at = next_retry_at
+        item.last_error_at = utcnow()
+
+    async def relay_stats(self) -> RelayStats:
+        pendientes = [
+            r for r in self.relays.values()
+            if r.delivered_at is None and r.abandoned_at is None
+        ]
+        errores = [r.last_error_at for r in self.relays.values() if r.last_error_at]
+        mas_viejo = min((r.created_at for r in pendientes), default=None)
+        return RelayStats(
+            pendientes=len(pendientes),
+            mas_viejo_segundos=(
+                max(0, int((utcnow() - mas_viejo).total_seconds()))
+                if mas_viejo is not None
+                else None
+            ),
+            ultimo_error_en=max(errores, default=None),
+        )
 
     async def get_or_create_conversation(
         self,

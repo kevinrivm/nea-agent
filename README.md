@@ -25,6 +25,15 @@ cerebro conversacional.
   seguidos → cierre digno + alerta interna (conteo determinista, no depende
   del humor del LLM); duda fuera del conocimiento aprobado → handoff, no
   inventa.
+- **Sabe cuándo parar**: si la conversación no va a ningún lado (3 mensajes de
+  relleno seguidos o 14 sin avanzar), se despide con una línea cálida y deja
+  de perseguir. Al relleno de después («gracias», «ok 👍») le contesta con
+  silencio; una pregunta de verdad reabre la conversación al momento. En el
+  CRM, la ficha del contacto enseña «Cierre sin rumbo» mientras dura. Los
+  umbrales se ajustan con `STALL_*`.
+- **Escribe en WhatsApp, no en Markdown**: lo que el modelo escribe con
+  `**negritas**`, títulos, tablas o `[enlaces](…)` se convierte antes de
+  enviarse (`app/formato.py`), sin tocar las URL.
 - **Degradación silenciosa**: si el LLM o el CRM fallan, el lead jamás recibe
   texto roto — silencio, reintentos con backoff, colas persistentes
   (`relay`, `pending_send`) y handoff de error.
@@ -138,20 +147,39 @@ cp .env.example .env                            # llena los REEMPLAZA_...
 uvicorn app.main:app --port 8000                # migraciones corren al arranque
 ```
 
-Salud: `GET /health`. El webhook de Meta va a `GET|POST /webhook` con tu
-`VERIFY_TOKEN`.
+Salud: `GET /health` responde 200 mientras la base conteste (503 si no), con
+qué Nea es y cómo le va al relay:
+
+```json
+{"status": "ok", "db": "ok", "version": "1.4.0", "commit": "9f03997",
+ "commitVerified": true, "mode": "estándar",
+ "relay": {"pendientes": 0, "masViejoSegundos": null, "ultimoErrorEn": null}}
+```
+
+`mode` es `estándar`, `cloud` o `multiorg`, y `relay` solo aparece en el modo
+de siempre (en cloud el CRM ya tiene el mensaje). `commit` va con
+`commitVerified: true` solo si salió del build; el `SOURCE_COMMIT` que la
+plataforma ponga en el entorno al arrancar viaja con `commitVerified: false`,
+porque puede estar desfasado. Una cola atrasada no cambia el código HTTP: no
+se arregla reiniciando el contenedor.
+
+El webhook de Meta va a `GET|POST /webhook` con tu `VERIFY_TOKEN`.
 
 ### Docker / Coolify
 
 El `Dockerfile` está listo para producción (healthcheck incluido). En Coolify:
 app desde este repo + un Postgres, variables del `.env.example` en el runtime,
-y el dominio del webhook hacia el puerto 8000.
+y el dominio del webhook hacia el puerto 8000. Para que `/health` diga qué
+versión corre, pasa los build args `NEA_VERSION` y `SOURCE_COMMIT`
+(`docker build --build-arg SOURCE_COMMIT=$(git rev-parse HEAD) …`).
 
 ### Probar en seco
 
 - **Allowlist de pruebas**: con `ALLOWED_WA_IDS` poblada, Nea solo responde a
   esas identidades (todo lo demás se releva al CRM sin respuesta). Vacíala
-  únicamente para salir a producción.
+  únicamente para salir a producción. Una identidad es el teléfono con lada
+  o, para quien escribe sin compartir su número, el BSUID como lo enseña el
+  CRM (`bsuid:US.1349…`; sin el prefijo también vale).
 - **Comando `/reset`**: desde una línea listada en `TESTER_WA_IDS`, reinicia
   la memoria de esa conversación (ficha limpia, IA reactivada) — cada prueba
   arranca con un lead virgen. Es una variable aparte de `ALLOWED_WA_IDS` a
@@ -171,7 +199,7 @@ Los NUNCA del chasis en `app/prompt.py` no se relajan sin re-correr esa
 verificación de comportamiento.
 
 ```bash
-pytest -q          # 366 tests: 330 offline + 36 de PgStore, que se saltan sin Postgres
+pytest -q          # 464 tests: 427 offline + 37 de PgStore, que se saltan sin Postgres
 ```
 
 Las de `tests/test_pg_store.py` corren `PgStore` contra un Postgres de verdad
@@ -194,6 +222,9 @@ que definen la personalidad:
 | `AGENT_NAME` | `Nea` | Nombre del agente si el CRM no define uno |
 | `AGENT_TIMEZONE` | `America/Mexico_City` | Zona horaria IANA para fechas del prompt |
 | `BRIEF_PATH` | *(vacío)* | Markdown local con el brief del negocio (fallback) |
+| `STALL_FILLER_STREAK` | `3` | Mensajes de relleno seguidos que cierran la conversación (0 = apagado) |
+| `STALL_MAX_TURNS` | `14` | Mensajes del lead sin avanzar que la cierran (0 = apagado) |
+| `STALL_COOLDOWN_HOURS` | `24` | Tras el cierre, cuánto se contesta el relleno con silencio |
 
 ## Licencia
 

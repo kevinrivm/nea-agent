@@ -12,7 +12,7 @@ import logging
 from contextlib import asynccontextmanager
 from functools import partial
 from pathlib import Path
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -36,6 +36,7 @@ from app.relay import RelayWorker
 from app.sender import SenderWorker
 from app.state import AppContext
 from app.turn import handle_flush
+from app.version import commit, version
 from app.webhook import router as webhook_router
 
 logging.basicConfig(
@@ -52,6 +53,47 @@ def _wire_coalescer(ctx: AppContext) -> None:
         ctx.coalescer = Coalescer(
             ctx.settings.coalesce_seconds, partial(handle_flush, ctx)
         )
+
+
+def _identidad(settings: Settings | None) -> dict[str, Any]:
+    """Qué Nea es: versión, commit y modo. Lo lee el CRM («Quién responde»).
+
+    `commit` y `commitVerified` van igual que en el `/api/health` del CRM: solo
+    si hay commit, y `commitVerified` es `true` únicamente si salió del build
+    (app/version.py). Nada de secretos ni de URLs: el webhook del CRM lleva
+    su token en la ruta.
+    """
+    cuerpo: dict[str, Any] = {"version": version()}
+    c = commit()
+    if c.corto:
+        cuerpo["commit"] = c.corto
+        cuerpo["commitVerified"] = c.verificado
+    if settings is not None:
+        cuerpo["mode"] = (
+            "multiorg"
+            if settings.multi_org
+            else "cloud" if settings.cloud_mode else "estándar"
+        )
+    return cuerpo
+
+
+async def _estado_del_relay(ctx: AppContext) -> dict[str, Any] | None:
+    """La cola del relay al CRM. `None` si no se pudo leer: la DB ya
+    contestó al ping, y un fallo aquí no debe tumbar el healthcheck."""
+    try:
+        stats = await ctx.store.relay_stats()
+    except Exception:
+        logger.exception("health: no pude leer la cola del relay")
+        return None
+    return {
+        "pendientes": stats.pendientes,
+        "masViejoSegundos": stats.mas_viejo_segundos,
+        "ultimoErrorEn": (
+            stats.ultimo_error_en.isoformat(timespec="seconds")
+            if stats.ultimo_error_en is not None
+            else None
+        ),
+    }
 
 
 def create_app(ctx: AppContext | None = None) -> FastAPI:
@@ -204,17 +246,29 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
 
     @app.get("/health")
     async def health(request: Request):  # type: ignore[no-untyped-def]
+        # El código HTTP lo decide SOLO la base: es lo que mira el HEALTHCHECK
+        # del Dockerfile, y una cola atrasada del relay no se arregla
+        # reiniciando el contenedor. Lo demás es para quien lo lea (el CRM).
         c: AppContext | None = request.app.state.ctx
         if c is None:
-            return JSONResponse({"status": "starting"}, status_code=503)
+            return JSONResponse(
+                {"status": "starting", **_identidad(None)}, status_code=503
+            )
+        identidad = _identidad(c.settings)
         try:
             await c.store.ping()
         except Exception:
             logger.exception("health: la DB no responde")
             return JSONResponse(
-                {"status": "degraded", "db": "error"}, status_code=503
+                {"status": "degraded", "db": "error", **identidad}, status_code=503
             )
-        return {"status": "ok", "db": "ok"}
+        cuerpo: dict[str, Any] = {"status": "ok", "db": "ok", **identidad}
+        # El relay solo corre en el modo de siempre (en cloud el CRM ya tiene
+        # el mensaje): ahí, ¿cuántos entrantes esperan llegar al CRM, desde
+        # cuándo, y cuándo falló la última entrega?
+        if not c.settings.cloud_mode:
+            cuerpo["relay"] = await _estado_del_relay(c)
+        return cuerpo
 
     return app
 

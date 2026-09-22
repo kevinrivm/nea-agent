@@ -57,6 +57,7 @@ from app.state import (
     OfferedSlot,
     PendingSend,
     RelayItem,
+    RelayStats,
 )
 from tests.conftest import (
     CRM_CONV_ID,
@@ -272,6 +273,30 @@ async def test_reprogramar_saca_el_relay_de_la_cola_hasta_su_hora(store):
     [item] = await store.due_relays(ahora + timedelta(minutes=6))
     assert item.attempts == 3
     assert item.next_retry_at == ahora + timedelta(minutes=5)
+
+
+async def test_el_estado_del_relay_para_health(store):
+    """Lo que /health enseña: pendientes, edad del más viejo, último error."""
+    assert await store.relay_stats() == RelayStats(0, None, None)
+    fallido = await store.enqueue_relay(b"{}", None)
+    await store.enqueue_relay(b"{}", None)
+    await store.mark_relay_delivered(await store.enqueue_relay(b"{}", None))
+    await store.mark_relay_abandoned(await store.enqueue_relay(b"{}", None))
+    ahora = await _ahora(store)
+    await store.reschedule_relay(fallido, 1, ahora + timedelta(seconds=30))
+    await store.pool.execute(
+        "UPDATE relay_queue SET created_at = now() - interval '5 minutes' WHERE id = $1",
+        fallido,
+    )
+
+    stats = await store.relay_stats()
+
+    assert stats.pendientes == 2  # ni el entregado ni el abandonado
+    assert 300 <= stats.mas_viejo_segundos < 400
+    assert stats.ultimo_error_en is not None
+    assert stats.ultimo_error_en.tzinfo is not None
+    [item] = [i for i in await store.due_relays(ahora + timedelta(minutes=1)) if i.id == fallido]
+    assert item.last_error_at == stats.ultimo_error_en
 
 
 async def test_entregado_o_abandonado_ya_no_se_reintenta(store):
@@ -541,6 +566,7 @@ async def test_update_conversation_guarda_cada_columna(store):
         followup_sent=True,
         last_inbound_at=t - timedelta(hours=1),
         stalled_at=t + timedelta(minutes=1),
+        stall_since_message_id=42,
     )
     leida = await store.get_or_create_conversation(IDENTITY)
     assert leida.crm_conversation_id == CRM_CONV_ID
@@ -550,6 +576,7 @@ async def test_update_conversation_guarda_cada_columna(store):
     assert leida.followup_sent is True
     assert leida.last_inbound_at == t - timedelta(hours=1)
     assert leida.stalled_at == t + timedelta(minutes=1)
+    assert leida.stall_since_message_id == 42
 
     # Y se pueden volver a vaciar (así reabre el turno una conversación).
     await store.update_conversation(conv.id, stalled_at=None, followup_due_at=None)
