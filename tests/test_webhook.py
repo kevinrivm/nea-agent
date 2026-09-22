@@ -16,6 +16,7 @@ from tests.conftest import (
     CRM_URL,
     IDENTITY,
     FakeLLM,
+    crm_context,
     make_ctx,
     make_settings,
     mock_crm_basics,
@@ -75,6 +76,88 @@ def test_verify_signature_pura():
 # ------------------------------------------------------------- identidad ---
 
 
+def _payload_bsuid(mensaje: dict, contacts: list | None = None) -> dict:
+    return {
+        "entry": [
+            {
+                "changes": [
+                    {
+                        "field": "messages",
+                        "value": {
+                            "contacts": contacts or [],
+                            "messages": [
+                                {"id": "wamid.bsuid.1", "type": "text",
+                                 "text": {"body": "hola, ¿cuánto cuesta?"}, **mensaje}
+                            ],
+                        },
+                    }
+                ]
+            }
+        ]
+    }
+
+
+@pytest.mark.parametrize(
+    "mensaje,contacts,esperada",
+    [
+        # Solo BSUID: el CRM lo guarda como `bsuid:<id>` (identity.ts).
+        ({"from_user_id": "US.13491208655302741918"}, None, "bsuid:US.13491208655302741918"),
+        # Sin from_user_id, el BSUID sale de contacts[].user_id, como en el CRM.
+        ({}, [{"user_id": "MX.998877", "profile": {"name": "Ana"}}], "bsuid:MX.998877"),
+        # Con teléfono manda el teléfono (canónico), aunque también venga BSUID.
+        ({"from": "5215550001111", "from_user_id": "MX.1"}, None, "525550001111"),
+        # Un BSUID que ya trae el prefijo no se duplica.
+        ({"from_user_id": "bsuid:MX.2"}, None, "bsuid:MX.2"),
+    ],
+)
+def test_la_identidad_sale_en_la_forma_del_crm(mensaje, contacts, esperada):
+    [msg] = extract_inbound(_payload_bsuid(mensaje, contacts))
+    assert msg.identity == esperada
+
+
+def test_la_allowlist_acepta_el_bsuid_con_o_sin_prefijo():
+    settings = make_settings(
+        allowed_wa_ids="US.13491208655302741918, bsuid:MX.9 ,5215550001111"
+    )
+    assert settings.allowed_identities == {
+        "bsuid:US.13491208655302741918",
+        "bsuid:MX.9",
+        "525550001111",
+    }
+
+
+def test_sin_telefono_ni_bsuid_se_descarta():
+    assert extract_inbound(_payload_bsuid({}, [{"profile": {"name": "?"}}])) == []
+
+
+async def test_un_lead_solo_con_bsuid_recibe_respuesta(respx_mock):
+    """Antes: `/api/bot/context?waIdentity=US.123` daba 404 (el CRM lo tiene
+    como `bsuid:US.123`) y Nea callaba para siempre con ese lead."""
+    ctx = make_ctx()
+    routes = mock_crm_basics(respx_mock)
+    pedidas: list[str] = []
+
+    def contexto(request):
+        identidad = request.url.params.get("waIdentity")
+        pedidas.append(identidad)
+        if identidad != "bsuid:US.555":
+            return httpx.Response(404, json={"error": {"code": "not_found"}})
+        return httpx.Response(200, json=crm_context())
+
+    routes["context"].mock(side_effect=contexto)
+    app = create_app(ctx=ctx)
+    cuerpo = json.dumps(_payload_bsuid({"from_user_id": "US.555"})).encode()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://bot.test"
+    ) as client:
+        resp = await client.post("/webhook", content=cuerpo)
+        assert resp.status_code == 200
+        await asyncio.sleep(0.35)
+    assert pedidas and set(pedidas) == {"bsuid:US.555"}
+    assert routes["messages"].call_count == 1
+    await ctx.crm.aclose()
+
+
 def test_extract_inbound_canonicaliza_mx_521():
     """Meta manda `from: 521XXXXXXXXXX`; el CRM guarda 52XXXXXXXXXX — la
     identidad debe salir canónica desde el parseo (bug real de producción:
@@ -107,7 +190,7 @@ def test_extract_inbound_canonicaliza_mx_521():
         ]
     }
     inbound = extract_inbound(payload)
-    assert [m.identity for m in inbound] == ["525550001111", "bsuid-abc"]
+    assert [m.identity for m in inbound] == ["525550001111", "bsuid:bsuid-abc"]
 
 
 def test_echo_de_coexistence_no_abre_turno():

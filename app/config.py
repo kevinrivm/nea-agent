@@ -6,6 +6,8 @@ la validación de lo obligatorio ocurre al arranque real.
 """
 from __future__ import annotations
 
+import re
+
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -21,6 +23,22 @@ def canonical_identity(wa_id: str) -> str:
     if s.startswith("521") and len(s) == 13 and s.isdigit():
         return "52" + s[3:]
     return s
+
+
+# Un BSUID tal como lo manda Meta: país, punto y el identificador
+# (`US.13491208655302741918`). El CRM lo guarda como `bsuid:<id>`.
+_BSUID_PELON = re.compile(r"^[A-Za-z]{2}\.[A-Za-z0-9]+$")
+
+
+def _identidad_de_lista(parte: str) -> str:
+    """Una entrada de ALLOWED_WA_IDS / TESTER_WA_IDS, en la forma del CRM.
+
+    Las identidades llegan como las guarda el CRM (app/webhook.py): el BSUID
+    con su prefijo `bsuid:`. En la lista vale escribirlo como lo enseña el
+    CRM o pelón, como sale en el payload de Meta.
+    """
+    s = canonical_identity(parte)
+    return f"bsuid:{s}" if _BSUID_PELON.match(s) else s
 
 
 class Settings(BaseSettings):
@@ -242,7 +260,7 @@ class Settings(BaseSettings):
     @staticmethod
     def _identities(csv: str) -> frozenset[str]:
         return frozenset(
-            canonical_identity(part) for part in csv.split(",") if part.strip()
+            _identidad_de_lista(part) for part in csv.split(",") if part.strip()
         )
 
     @property
