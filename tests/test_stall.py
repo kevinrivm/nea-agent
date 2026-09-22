@@ -376,3 +376,23 @@ async def test_en_cloud_la_marca_va_por_la_ficha_del_cerebro():
         "ficha": {FICHA_CIERRE: None},
     }
     await cliente.aclose()
+
+
+async def test_un_maximo_alto_trae_historial_suficiente_para_contarse(respx_mock):
+    """Con STALL_MAX_TURNS=25 no bastan los 40 mensajes de siempre (~20 del
+    lead): el turno trae los que hagan falta para poder llegar al tope."""
+    ctx = make_ctx(make_settings(stall_max_turns=25))
+    routes = mock_crm_basics(respx_mock)
+    conv = await ctx.store.get_or_create_conversation(IDENTITY)
+    for i in range(24):
+        await ctx.store.add_message(conv.id, "user", f"dato del negocio número {i}")
+        await ctx.store.add_message(conv.id, "assistant", f"respuesta {i}")
+    await ctx.store.update_conversation(conv.id, crm_conversation_id="cv_test1")
+    app = create_app(ctx=ctx)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://bot.test"
+    ) as client:
+        await _manda(client, "y otro dato más del negocio", "wamid.x25")
+    assert (await ctx.store.get_or_create_conversation(IDENTITY)).stalled_at is not None
+    assert routes["messages"].call_count == 1
+    await ctx.crm.aclose()

@@ -39,7 +39,8 @@ logger = logging.getLogger("nea.turn")
 
 MAX_TOOL_ROUNDS = 5
 # Mensajes que se traen, como mínimo, para contar el hilo del lead (el LLM ve
-# menos). Si STALL_MAX_TURNS pide contar más, se traen más.
+# menos). Si STALL_MAX_TURNS pide contar más de lo que cabe (un mensaje del
+# lead por cada dos), se traen más; con los valores por defecto, 40 como siempre.
 STALL_LOOKBACK = 40
 CONTEXT_ATTEMPTS = 3  # el relay puede tardar un instante en aterrizar en el CRM
 
@@ -318,7 +319,7 @@ async def run_turn(
     # Se traen más mensajes de los que ve el LLM: el candado de cierre cuenta
     # el hilo COMPLETO del lead, no solo la ventana de contexto.
     recientes = await ctx.store.recent_messages(
-        conv.id, max(STALL_LOOKBACK, 3 * settings.stall_max_turns)
+        conv.id, max(STALL_LOOKBACK, 2 * settings.stall_max_turns + 2)
     )
     history = recientes[-settings.history_window :]
     messages: list[dict[str, Any]] = [{"role": "system", "content": system}] + [
