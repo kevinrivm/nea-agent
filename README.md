@@ -326,6 +326,12 @@ CRM: revisa `CRM_WEBHOOK_URL` (dominio y token), que el CRM esté arriba y que
 su `META_APP_SECRET` sea el de tu app. Cada webhook se reintenta hasta 24 h;
 después se abandona y deja de contar.
 
+Vocero raíz 1.4.0 lee este `/health` para su tarjeta «Quién responde a tus
+clientes» (pantalla Agente) si el CRM tiene `BRAIN_HEALTH_URL` con la
+dirección interna de Nea, p. ej. `http://nea:8000/health` con el alias de red
+de Coolify. Ahí se ve «Nea · en línea · v1.0.0 · modo estándar · 0 mensajes
+por relevar», y un aviso rojo si el agente incluido del CRM también contesta.
+
 ## Desarrollo local
 
 Requisitos: Python 3.11+, un Postgres propio y un Vocero CRM con lo del paso 1.
