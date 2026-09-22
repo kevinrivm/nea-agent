@@ -10,7 +10,8 @@ name: imagen
 #   prerelease). Es lo que instala el starter: Coolify descarga la imagen en
 #   vez de construirla en el VPS.
 #
-# La versión (NEA_VERSION) y el commit (SOURCE_COMMIT) se hornean como build
+# La versión (NEA_VERSION, sin la «v»: `1.0.0`, igual que la etiqueta de la
+# imagen y que el `version` del CRM) y el commit (SOURCE_COMMIT) se hornean como build
 # args: es lo que /health enseña como `version` y `commit`.
 on:
   pull_request:
@@ -66,7 +67,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            NEA_VERSION=${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'dev' }}
+            NEA_VERSION=${{ startsWith(github.ref, 'refs/tags/v') && steps.meta.outputs.version || 'dev' }}
             SOURCE_COMMIT=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
