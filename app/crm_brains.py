@@ -26,10 +26,11 @@ from typing import Any
 import httpx
 
 from app.crm import (
-    AgendaUnavailable,
     CrmClient,
     CrmConflict,
     CrmError,
+    _404_de_agenda,
+    _agenda_apagada,
     _booking_conflict,
     _conflict_code,
     _payload,
@@ -285,18 +286,32 @@ class BrainsCrmClient(CrmClient):
         """
         return self._perfil
 
-    async def agenda_available(self) -> bool:
-        """¿Este CRM agenda? 404 = la bandera está apagada allá."""
+    async def sondear_agenda(self, timeout: float | None = None) -> bool | None:
+        """¿Este CRM agenda? Solo el 404 VACÍO es la bandera apagada.
+
+        Esta superficie autentica y exige conversación, así que la sonda
+        pregunta por una inventada (`cv_sonda`). Con la agenda encendida el CRM
+        contesta 404 CON su sobre de error («conversación no encontrada»), o
+        401: el endpoint existe. Cuando aquí se leía cualquier 404 como
+        apagada, una Nea cloud de un solo negocio arrancaba SIEMPRE sin agenda.
+
+        Sin respuesta (red, timeout, 5xx) no se puede concluir: None, y quien
+        pregunta decide — `agenda_available` asume que sí, porque prometer
+        menos de lo que hay es tan malo como prometer de más.
+        """
+        extra: dict[str, Any] = {} if timeout is None else {"timeout": timeout}
         try:
             resp = await self._request(
-                "GET", "/api/bot/availability", params={"conversationId": "cv_sonda"}
+                "GET",
+                "/api/bot/availability",
+                params={"conversationId": "cv_sonda"},
+                **extra,
             )
         except CrmError:
-            # Sin respuesta no se puede concluir que NO haya agenda. Se asume
-            # que sí y el primer intento real lo dirá: prometer menos de lo que
-            # hay es tan malo como prometer de más.
-            return True
-        return resp.status_code != 404
+            return None
+        if resp.status_code >= 500:
+            return None
+        return not _agenda_apagada(resp)
 
     async def get_availability(
         self,
@@ -316,8 +331,7 @@ class BrainsCrmClient(CrmClient):
             "/api/bot/availability",
             params={"conversationId": conversation_id},
         )
-        if resp.status_code == 404:
-            raise AgendaUnavailable("este CRM no tiene el motor de agenda encendido")
+        _404_de_agenda(resp, "availability")
         if resp.status_code != 200:
             raise CrmError("availability_unknown: no afirmar que el calendario está libre; reintentar o derivar")
         slots = resp.json().get("slots") or []
@@ -342,8 +356,7 @@ class BrainsCrmClient(CrmClient):
         if date:
             params["date"] = date
         resp = await self._request("GET", "/api/bot/availability", params=params)
-        if resp.status_code == 404:
-            raise AgendaUnavailable("este CRM no tiene el motor de agenda encendido")
+        _404_de_agenda(resp, "availability")
         if resp.status_code != 200:
             raise CrmError("availability_unknown: no afirmar que el calendario está libre; reintentar o derivar")
         data = resp.json()
@@ -379,12 +392,13 @@ class BrainsCrmClient(CrmClient):
             raise _booking_conflict(resp)
         if resp.status_code == 404:
             # Mismo 404 ambiguo que en `/api/bot`: con cuerpo es "no hay cita
-            # que mover"; vacío, "aquí no hay agenda". Leerlos igual apagaba
-            # el agendamiento de toda la instancia la primera vez que alguien
+            # que mover" (o, al reservar, "no encuentro esa conversación");
+            # vacío, "aquí no hay agenda". Leerlos igual apagaba el
+            # agendamiento de toda la instancia la primera vez que alguien
             # quería mover una cita que ya había pasado.
-            if method == "PATCH" and _payload(resp):
+            if method == "PATCH" and not _agenda_apagada(resp):
                 raise CrmConflict("no_booking", _payload(resp))
-            raise AgendaUnavailable("este CRM no tiene el motor de agenda encendido")
+            _404_de_agenda(resp, que)
         if resp.status_code not in (200, 201):
             raise CrmError(f"{que} devolvió {resp.status_code}")
         return _aplanar_reserva(resp.json())
