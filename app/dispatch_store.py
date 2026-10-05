@@ -32,6 +32,12 @@ class PgDispatchStore:
           (organization_id,dispatch_id,conversation_id,payload) VALUES ($1,$2,$3,$4::jsonb)
           ON CONFLICT DO NOTHING""", org, payload["dispatchId"], payload["conversation"]["id"], json.dumps(payload))
 
+    async def forget_dispatches(self, org: str, conversation_id: str, keep: str) -> None:
+        """The payload column holds the lead's messages verbatim. `keep` is the
+        row being processed right now: finish() must still find it."""
+        await self.pool.execute("""DELETE FROM dispatch_inbox
+          WHERE organization_id=$1 AND conversation_id=$2 AND dispatch_id<>$3""", org, conversation_id, keep)
+
     @asynccontextmanager
     async def claim_dispatch(self) -> AsyncIterator[DispatchJob | None]:
         async with self.pool.acquire() as conn:
@@ -90,6 +96,12 @@ class MemoryDispatchStore:
         self._inbox().setdefault((org, payload["dispatchId"]), {
             "payload": json.loads(json.dumps(payload)), "state": "queued", "available_at": datetime.now(timezone.utc),
         })
+
+    async def forget_dispatches(self, org: str, conversation_id: str, keep: str) -> None:
+        inbox = self._inbox()
+        for key in [k for k, row in inbox.items() if k[0] == org and k[1] != keep
+                    and row["payload"]["conversation"]["id"] == conversation_id]:
+            del inbox[key]
 
     @asynccontextmanager
     async def claim_dispatch(self) -> AsyncIterator[DispatchJob | None]:

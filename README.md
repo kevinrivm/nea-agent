@@ -128,6 +128,18 @@ clave de LLM son los de él.
   la misma persona puede escribirle a dos negocios sin que el historial de uno
   aparezca en el prompt del otro.
 
+#### Cuando el CRM elimina una conversación
+
+El CRM avisa por la misma ruta y con la misma firma, con
+`"type": "conversation.deleted"` en el cuerpo. Nea guarda el aviso, responde
+200 y borra lo que recordaba de esa conversación: historial, fase, horarios
+ofrecidos, envíos pendientes y los despachos guardados. Solo en la
+organización del aviso.
+
+Si el aviso no llega (Nea reiniciándose, un CRM que no avisa), hay una red:
+cuando la misma persona vuelve con un `conversation.id` distinto del que Nea
+recordaba, el turno empieza de cero. Esa red también cubre el modo estándar.
+
 El despliegue lo registra el dueño de la plataforma desde el CRM
 (`pnpm cerebro:registrar`), y cada miembro lo elige en Ajustes → Cerebro: sin
 URL que pegar ni secreto que copiar, porque el secreto no es suyo.

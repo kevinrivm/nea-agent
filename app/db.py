@@ -309,6 +309,25 @@ class PgStore(PgDispatchStore):
                     conversation_id,
                 )
 
+    async def forget_conversation(
+        self, organization_id: str, wa_identity: str, crm_conversation_id: str
+    ) -> bool:
+        # Una sola sentencia: `bot_message`, `offered_slots` y `pending_send`
+        # cuelgan de la fila con ON DELETE CASCADE (001 y 002), así que no hay
+        # orden que equivocar ni estado a medias si el proceso muere.
+        row = await self.pool.fetchrow(
+            """
+            DELETE FROM bot_conversation
+            WHERE organization_id = $1 AND wa_identity = $2
+              AND (crm_conversation_id IS NULL OR crm_conversation_id = $3)
+            RETURNING id
+            """,
+            organization_id,
+            wa_identity,
+            crm_conversation_id,
+        )
+        return row is not None
+
     # ----------------------------------------------------------- mensajes ---
 
     async def add_message(

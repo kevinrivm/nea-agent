@@ -4,6 +4,21 @@ Qué cambia en cada versión de Nea y qué hacer al actualizar. Cada tag
 `vX.Y.Z` publica la imagen `ghcr.io/kevinrivm/nea-agent:X.Y.Z` (README,
 «Instalar»).
 
+## Sin publicar
+
+### Nuevo
+
+- **Nea olvida las conversaciones que el CRM elimina.** En modo cloud,
+  `POST /vocero/dispatch` acepta el evento `conversation.deleted` (misma
+  firma que un despacho) y borra el historial, la fase, los horarios
+  ofrecidos, los envíos pendientes y los despachos guardados de esa
+  conversación, solo en la organización del aviso. El aviso pasa por la cola
+  de despachos: un turno que esperaba termina antes, y un mensaje nuevo de la
+  misma persona empieza después.
+- **Una conversación nueva del CRM no hereda memoria**, en los dos modos. Si
+  la misma persona llega con un `conversation.id` distinto del que Nea
+  recordaba, el turno empieza de cero. Es lo que cubre un aviso que no llegó.
+
 ## 1.0.0 — 2026-09-30
 
 Primera versión con número y primera con imagen publicada. Hasta aquí Nea se

@@ -480,6 +480,11 @@ async def run_turn(
     # a dos negocios comparta historial. Ver migrations/004_multiorg.sql.
     org_id, org_slug = ctx.organizacion or ("", "")
     conv = await ctx.store.get_or_create_conversation(identity, org_id, org_slug)
+    # En cloud el despacho ya dijo de qué conversación del CRM es este turno:
+    # si no es la que Nea recordaba, se olvida ANTES de los gates de abajo,
+    # que leen esa memoria (un cierre sin rumbo viejo callaría el primer
+    # mensaje de la conversación nueva).
+    conv = await _olvidar_si_es_otra(ctx, conv, turno.crm_conversation_id, identity)
 
     # --- Comando /reset (líneas de prueba) --------------------------------
     # Corre ANTES de los gates de aiEnabled/ventana: un reset también debe
@@ -537,6 +542,8 @@ async def run_turn(
     if not conversation_info.get("windowOpen", False):
         logger.info("turno %s: ventana de 24 h cerrada — silencio", identity)
         return
+    # En el modo de siempre la conversación del CRM se conoce hasta aquí.
+    conv = await _olvidar_si_es_otra(ctx, conv, str(crm_conv_id), identity)
     # Desde aquí el turno es de Nea: si revienta, la red de seguridad de
     # handle_flush sabe a qué conversación del CRM avisarle.
     turno.crm_conversation_id = str(crm_conv_id)
@@ -771,6 +778,35 @@ async def _anotar_cierre(
             "anotar" if valor else "borrar",
             exc,
         )
+
+
+async def _olvidar_si_es_otra(
+    ctx: AppContext, conv: Any, crm_conversation_id: str | None, identity: str
+) -> Any:
+    """La red de seguridad del borrado: memoria de OTRA conversación no se usa.
+
+    Cuando alguien elimina una conversación en el CRM, este avisa (ver
+    `app/dispatch.py`). Pero el aviso puede no llegar —Nea reiniciándose, un CRM
+    que no avisa— y entonces lo único que delata el borrado es que la misma
+    persona vuelve con una conversación de id distinto. Contestarle con el
+    historial de la que se eliminó sería justo lo que el borrado prometió que
+    no iba a pasar.
+    """
+    anterior = conv.crm_conversation_id
+    if not crm_conversation_id or not anterior or anterior == crm_conversation_id:
+        return conv
+    logger.info(
+        "turno %s: el CRM cambió la conversación (%s → %s) — empiezo de cero",
+        identity,
+        anterior,
+        crm_conversation_id,
+    )
+    # Lo mismo que hace el aviso, y no un `reset_conversation`: aquel conserva
+    # la fila y sus envíos pendientes, que aquí serían respuestas a una
+    # conversación que ya no existe.
+    org_id, org_slug = ctx.organizacion or ("", "")
+    await ctx.store.forget_conversation(org_id, identity, anterior)
+    return await ctx.store.get_or_create_conversation(identity, org_id, org_slug)
 
 
 async def _run_reset(ctx: AppContext, conv: Any, identity: str) -> None:

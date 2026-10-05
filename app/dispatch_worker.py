@@ -22,12 +22,16 @@ async def handoff(ctx: Any, payload: dict[str, Any]) -> None:
 
 
 async def drain_one(ctx: Any) -> bool:
-    from app.dispatch import _procesar
+    from app.dispatch import EVENTO_OLVIDO, _procesar, olvidar
     async with ctx.store.claim_dispatch() as job:
         if job is None:
             return False
 
         async def execute() -> None:
+            if job.payload.get("type") == EVENTO_OLVIDO:
+                # Not a turn: nothing to hand off, and replaying it is safe.
+                await olvidar(ctx, job.payload)
+                return
             expires = job.payload.get("expiresAt")
             expired = bool(expires and datetime.fromisoformat(expires.replace("Z", "+00:00")) <= datetime.now(timezone.utc))
             if job.recovery or expired:
