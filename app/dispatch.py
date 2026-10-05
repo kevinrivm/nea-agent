@@ -32,12 +32,16 @@ from fastapi.responses import JSONResponse
 from app.multiorg import organizacion_del_despacho
 from app.http_limits import limited_body
 from app.state import AppContext, InboundMessage
-from app.turn import handle_flush
+from app.turn import conversation_lock, handle_flush
 
 logger = logging.getLogger("nea.dispatch")
 
 router = APIRouter()
 
+# El CRM eliminó la conversación y pide que se olvide. Llega por la MISMA ruta
+# y con la MISMA firma que un despacho: es el único canal que el CRM tiene
+# hacia un cerebro, y un segundo endpoint sería una segunda URL que registrar.
+EVENTO_OLVIDO = "conversation.deleted"
 
 
 def firma_valida(body: bytes, header: str | None, secret: str) -> bool:
@@ -114,6 +118,9 @@ async def recibir(request: Request) -> Any:
     if not isinstance(payload, dict):
         return JSONResponse({"error": "cuerpo inesperado"}, status_code=400)
 
+    if payload.get("type") == EVENTO_OLVIDO:
+        return await _recibir_olvido(ctx, payload)
+
     try:
         valid = (isinstance(payload.get("dispatchId"), str) and 0 < len(payload["dispatchId"]) <= 128
             and isinstance(payload.get("conversation"), dict) and isinstance(payload["conversation"].get("id"), str)
@@ -137,6 +144,68 @@ async def recibir(request: Request) -> Any:
         return JSONResponse({"error": "almacenamiento indisponible"}, status_code=503)
     ctx.dispatch_wake.set()
     return {"status": "ok"}
+
+
+def _texto(valor: Any) -> bool:
+    return isinstance(valor, str) and 0 < len(valor) <= 128
+
+
+async def _recibir_olvido(ctx: AppContext, payload: dict[str, Any]) -> Any:
+    """Acusa recibo del borrado en cuanto queda guardado; olvidar va después.
+
+    Va a la misma cola que los despachos, y no directo a la base, por el orden:
+    la cola se atiende de la más vieja a la más nueva dentro de cada
+    organización, así que un turno de esa conversación que aún esperaba termina
+    ANTES de olvidar, y un mensaje nuevo de la misma persona empieza DESPUÉS.
+    Borrar aquí mismo dejaría a ese turno escribiendo historial de una
+    conversación que ya no existe.
+    """
+    conversation = payload.get("conversation")
+    contact = payload.get("contact")
+    valid = (
+        _texto(payload.get("eventId"))
+        and isinstance(conversation, dict) and _texto(conversation.get("id"))
+        and isinstance(contact, dict) and _texto(contact.get("identity"))
+        and isinstance(payload.get("organization", {}), dict)
+    )
+    org = organizacion_del_despacho(payload) if valid else None
+    if not valid or (ctx.settings.multi_org and org is None):
+        return JSONResponse({"error": "evento inválido"}, status_code=422)
+    # La cola se indexa por `dispatchId`. El prefijo impide que un evento de
+    # borrado se confunda con —o se deduplique contra— un despacho de verdad.
+    fila = {**payload, "dispatchId": f"olvido:{payload['eventId']}"}
+    try:
+        await ctx.store.enqueue_dispatch(org[0] if org else ctx.settings.crm_organization, fila)
+    except Exception:
+        logger.exception("no se pudo persistir el borrado")
+        return JSONResponse({"error": "almacenamiento indisponible"}, status_code=503)
+    ctx.dispatch_wake.set()
+    return {"status": "ok"}
+
+
+async def olvidar(ctx: AppContext, payload: dict[str, Any]) -> None:
+    """Borra lo que Nea recuerda de la conversación que el CRM eliminó.
+
+    Idempotente: repetirlo no encuentra nada que borrar. Por eso, a diferencia
+    de un turno, una ejecución interrumpida SÍ se repite al recuperarla.
+    """
+    conversation_id = str(payload["conversation"]["id"])
+    identity = str(payload["contact"]["identity"])
+    org = organizacion_del_despacho(payload)
+    # La misma regla que al guardar: con una Nea de un solo negocio la
+    # conversación no lleva organización, y la cola se indexa por la del entorno.
+    org_id = org[0] if (ctx.settings.multi_org and org) else ""
+    cola = org[0] if org else ctx.settings.crm_organization
+    # Con el candado del turno: en cloud la cola ya los pone en fila, pero el
+    # seguimiento y el reintento de envíos corren por fuera de ella.
+    async with conversation_lock(ctx, identity):
+        borrada = await ctx.store.forget_conversation(org_id, identity, conversation_id)
+        await ctx.store.forget_dispatches(cola, conversation_id, str(payload["dispatchId"]))
+    logger.info(
+        "olvido de %s: %s",
+        conversation_id,
+        "memoria borrada" if borrada else "no había nada que borrar",
+    )
 
 
 async def _procesar(ctx: AppContext, payload: dict[str, Any], *, durable: bool = False) -> None:

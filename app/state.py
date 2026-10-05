@@ -193,6 +193,17 @@ class Store(Protocol):
         """Borra historial + slots y regresa la conversación a estado inicial
         (comando /reset de la línea de pruebas)."""
         ...
+    async def forget_conversation(
+        self, organization_id: str, wa_identity: str, crm_conversation_id: str
+    ) -> bool:
+        """Borra TODO lo que Nea guarda de esa conversación: la fila, su
+        historial, sus horarios ofrecidos y sus envíos pendientes.
+
+        Solo si la fila sigue siendo de `crm_conversation_id` (o todavía no
+        sabe de cuál es). El aviso de borrado puede llegar tarde: si la persona
+        ya volvió a escribir, la fila es de la conversación NUEVA y borrarla
+        le quitaría la memoria a la que no se eliminó. True si borró algo."""
+        ...
 
     # historial LLM
     async def add_message(
@@ -381,6 +392,26 @@ class MemoryStore(MemoryDispatchStore):
         conv.followup_due_at = None
         conv.followup_sent = False
         conv.stalled_at = None
+
+    async def forget_conversation(
+        self, organization_id: str, wa_identity: str, crm_conversation_id: str
+    ) -> bool:
+        clave = (organization_id, wa_identity)
+        cid = self._conv_by_identity.get(clave)
+        if cid is None:
+            return False
+        actual = self.conversations[cid].crm_conversation_id
+        if actual is not None and actual != crm_conversation_id:
+            return False
+        del self._conv_by_identity[clave]
+        del self.conversations[cid]
+        self.messages = [m for m in self.messages if m.conversation_id != cid]
+        self.offered.pop(cid, None)
+        self.pending_sends = {
+            pid: p for pid, p in self.pending_sends.items()
+            if p.conversation_id != cid
+        }
+        return True
 
     async def add_message(
         self,

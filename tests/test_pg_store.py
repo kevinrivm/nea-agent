@@ -882,3 +882,78 @@ async def test_dispatch_queued_survives_new_store_instance(store):
             await job.finish()
     finally:
         await replacement.aclose()
+
+
+# ───────────────────────────────────────────────────────────────── olvido ───
+
+
+async def test_olvidar_se_lleva_la_fila_y_todo_lo_que_cuelga_de_ella(store):
+    conv = await store.get_or_create_conversation(IDENTITY, "org_a", "a")
+    await store.update_conversation(conv.id, crm_conversation_id=CRM_CONV_ID)
+    await store.add_message(conv.id, "user", "hola")
+    await store.replace_offered_slots(
+        conv.id,
+        [OfferedSlot(conv.id, await _ahora(store) + timedelta(days=1), None, "x")],
+    )
+    await store.enqueue_pending_send(conv.id, CRM_CONV_ID, "pendiente", "org_a", "a")
+    vecina = await store.get_or_create_conversation(IDENTITY, "org_b", "b")
+    await store.update_conversation(vecina.id, crm_conversation_id=CRM_CONV_ID)
+    await store.add_message(vecina.id, "user", "yo no me borro")
+
+    assert await store.forget_conversation("org_a", IDENTITY, CRM_CONV_ID) is True
+
+    for tabla in ("bot_message", "offered_slots", "pending_send"):
+        assert await store.pool.fetchval(
+            f"SELECT count(*) FROM {tabla} WHERE conversation_id = $1", conv.id
+        ) == 0, tabla
+    assert await store.pool.fetchval(
+        "SELECT count(*) FROM bot_conversation WHERE id = $1", conv.id
+    ) == 0
+    # La misma identidad en OTRO negocio no se toca.
+    assert [m.content for m in await store.recent_messages(vecina.id, 10)] == [
+        "yo no me borro"
+    ]
+    # Y repetirlo no encuentra nada: es lo que deja reintentar el aviso.
+    assert await store.forget_conversation("org_a", IDENTITY, CRM_CONV_ID) is False
+
+
+async def test_olvidar_respeta_a_la_conversacion_que_la_reemplazo(store):
+    conv = await store.get_or_create_conversation(IDENTITY)
+    await store.update_conversation(conv.id, crm_conversation_id="cv_la_nueva")
+    await store.add_message(conv.id, "user", "ya soy otra conversación")
+
+    assert await store.forget_conversation("", IDENTITY, "cv_eliminada") is False
+    assert len(await store.recent_messages(conv.id, 10)) == 1
+
+    # Sin conversación del CRM anotada todavía, sí: no hay otra que proteger.
+    await store.pool.execute(
+        "UPDATE bot_conversation SET crm_conversation_id = NULL WHERE id = $1", conv.id
+    )
+    assert await store.forget_conversation("", IDENTITY, "cv_eliminada") is True
+
+
+async def test_olvidar_borra_los_despachos_guardados_menos_el_que_corre(store):
+    from tests.test_dispatch_durable import payload
+
+    for dispatch_id, conversacion in (
+        ("dsp_1", "cv_a"),
+        ("dsp_2", "cv_a"),
+        ("olvido:olv_1", "cv_a"),
+        ("dsp_3", "cv_otra"),
+    ):
+        await store.enqueue_dispatch(
+            "org_a",
+            {**payload(), "dispatchId": dispatch_id, "conversation": {"id": conversacion}},
+        )
+    await store.enqueue_dispatch("org_b", {**payload(), "dispatchId": "dsp_4"})
+
+    await store.forget_dispatches("org_a", "cv_a", "olvido:olv_1")
+
+    filas = await store.pool.fetch(
+        "SELECT organization_id, dispatch_id FROM dispatch_inbox ORDER BY dispatch_id"
+    )
+    assert [(f["organization_id"], f["dispatch_id"]) for f in filas] == [
+        ("org_a", "dsp_3"),
+        ("org_b", "dsp_4"),
+        ("org_a", "olvido:olv_1"),
+    ]
