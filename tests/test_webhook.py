@@ -537,3 +537,74 @@ async def test_reset_no_depende_de_la_allowlist_de_respuesta(respx_mock):
     await ctx.crm.aclose()
     assert reset_route.call_count == 1
     assert len(ctx.llm.calls) == 0
+
+
+# ------------------------------------------------- URL secreta (sin firma) ---
+
+URL_TOKEN = "t0ken-de-url-con-mas-de-32-caracteres-0123"
+
+
+@pytest.fixture
+async def url_client(ctx):
+    """Nea SIN App Secret y con un VERIFY_TOKEN que sirve como secreto de ruta."""
+    ctx.settings.meta_app_secret = ""
+    ctx.settings.verify_token = URL_TOKEN
+    app = create_app(ctx=ctx)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://bot.test") as c:
+        yield c
+
+
+async def test_url_secreta_acepta_sin_app_secret(ctx, url_client, respx_mock):
+    mock_crm_basics(respx_mock)
+    resp = await url_client.post(f"/webhook/{URL_TOKEN}", content=wa_body())
+    assert resp.status_code == 200
+    await asyncio.sleep(0.02)
+    assert len(ctx.store.relays) == 1  # el relay al CRM quedó encolado
+
+
+async def test_url_secreta_equivocada_es_404_sin_efectos(ctx, url_client):
+    resp = await url_client.post("/webhook/" + "x" * 40, content=wa_body())
+    assert resp.status_code == 404
+    await asyncio.sleep(0.02)
+    assert len(ctx.store.relays) == 0
+
+
+async def test_sin_app_secret_la_entrada_sin_token_sigue_cerrada(url_client):
+    resp = await url_client.post("/webhook", content=wa_body())
+    assert resp.status_code == 401
+
+
+async def test_url_secreta_con_token_corto_no_abre(ctx, client):
+    # "vtoken" es un VERIFY_TOKEN válido para el handshake, no un secreto.
+    ctx.settings.meta_app_secret = ""
+    resp = await client.post("/webhook/vtoken", content=wa_body())
+    assert resp.status_code == 404
+
+
+async def test_url_secreta_con_app_secret_sigue_exigiendo_firma(
+    signed_ctx, signed_client, respx_mock
+):
+    signed_ctx.settings.verify_token = URL_TOKEN
+    mock_crm_basics(respx_mock)
+    body = wa_body()
+    sin_firma = await signed_client.post(f"/webhook/{URL_TOKEN}", content=body)
+    assert sin_firma.status_code == 401
+    firmado = await signed_client.post(
+        f"/webhook/{URL_TOKEN}",
+        content=body,
+        headers={"x-hub-signature-256": sign(body, signed_ctx.settings.meta_app_secret)},
+    )
+    assert firmado.status_code == 200
+
+
+async def test_url_secreta_responde_el_challenge(url_client):
+    params = {
+        "hub.mode": "subscribe",
+        "hub.verify_token": URL_TOKEN,
+        "hub.challenge": "reto-123",
+    }
+    ok = await url_client.get(f"/webhook/{URL_TOKEN}", params=params)
+    assert ok.status_code == 200 and ok.text == "reto-123"
+    otra_ruta = await url_client.get("/webhook/" + "x" * 40, params=params)
+    assert otra_ruta.status_code == 404

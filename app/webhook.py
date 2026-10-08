@@ -2,8 +2,12 @@
 
 Reglas duras:
 - El POST responde 200 en <1 s SIEMPRE; el procesamiento es asíncrono.
-- Firma `x-hub-signature-256` verificada si META_APP_SECRET está configurado
-  (inválida o ausente → 401). Sin secret → se rechaza.
+- Dos entradas. `/webhook` exige la firma `x-hub-signature-256` (inválida o
+  ausente → 401; sin META_APP_SECRET → se rechaza). `/webhook/<VERIFY_TOKEN>`
+  lleva el secreto en la ruta, como el webhook del CRM: ruta equivocada → 404,
+  y la firma se verifica solo si META_APP_SECRET está configurado. Es la
+  entrada para quien instala Nea en un servidor que no debe guardar el App
+  Secret (p. ej. un Tech Provider que despliega para sus clientes).
 - El body crudo se encola para el relay al CRM ANTES de cualquier parseo.
 - Dedup por `wa_message_id` (INSERT ... ON CONFLICT como gate atómico).
 - Identidad: la misma forma en que el CRM guarda al contacto — el teléfono
@@ -42,6 +46,18 @@ def verify_signature(body: bytes, header: str | None, secret: str | None) -> boo
         return False
     expected = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
     return hmac.compare_digest(header[len("sha256="):].lower(), expected)
+
+
+# Largo mínimo de VERIFY_TOKEN para abrir `/webhook/<token>`: ahí el token es
+# la única defensa, así que uno corto o adivinable no cuenta como secreto.
+MIN_URL_TOKEN = 32
+
+
+def is_valid_url_token(token: str, verify_token: str) -> bool:
+    """¿El segmento de la ruta es el VERIFY_TOKEN, y sirve como secreto?"""
+    if len(verify_token) < MIN_URL_TOKEN:
+        return False
+    return hmac.compare_digest(token.encode("utf-8"), verify_token.encode("utf-8"))
 
 
 def _extract_text(msg: dict[str, Any]) -> str | None:
@@ -190,18 +206,29 @@ def extract_inbound(payload: dict[str, Any]) -> list[InboundMessage]:
     return out
 
 
-@router.get("/webhook")
-async def verify(request: Request) -> PlainTextResponse:
-    """Verificación de suscripción de Meta (hub.challenge)."""
-    ctx: AppContext = request.app.state.ctx
+def _challenge(request: Request, verify_token: str) -> PlainTextResponse:
     params = request.query_params
     mode = params.get("hub.mode")
     token = params.get("hub.verify_token")
     challenge = params.get("hub.challenge") or ""
-    if mode == "subscribe" and token and token == ctx.settings.verify_token:
+    if mode == "subscribe" and token and token == verify_token:
         return PlainTextResponse(challenge)
     logger.warning("verificación del webhook con token inválido")
     return PlainTextResponse("verify token inválido", status_code=403)
+
+
+def _accept(ctx: AppContext, body: bytes, signature: str | None) -> dict[str, str]:
+    task = asyncio.create_task(_process(ctx, body, signature))
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
+    return {"status": "ok"}
+
+
+@router.get("/webhook")
+async def verify(request: Request) -> PlainTextResponse:
+    """Verificación de suscripción de Meta (hub.challenge)."""
+    ctx: AppContext = request.app.state.ctx
+    return _challenge(request, ctx.settings.verify_token)
 
 
 @router.post("/webhook")
@@ -213,11 +240,36 @@ async def receive(request: Request) -> Any:
     if not verify_signature(body, signature, ctx.settings.meta_app_secret or None):
         logger.warning("firma inválida o ausente en el webhook — 401")
         return JSONResponse({"error": "firma inválida"}, status_code=401)
+    return _accept(ctx, body, signature)
 
-    task = asyncio.create_task(_process(ctx, body, signature))
-    _bg_tasks.add(task)
-    task.add_done_callback(_bg_tasks.discard)
-    return {"status": "ok"}
+
+@router.get("/webhook/{url_token}")
+async def verify_con_url_secreta(url_token: str, request: Request) -> PlainTextResponse:
+    """El mismo challenge, en la entrada con el secreto en la ruta."""
+    ctx: AppContext = request.app.state.ctx
+    if not is_valid_url_token(url_token, ctx.settings.verify_token):
+        return PlainTextResponse("", status_code=404)
+    return _challenge(request, ctx.settings.verify_token)
+
+
+@router.post("/webhook/{url_token}")
+async def receive_con_url_secreta(url_token: str, request: Request) -> Any:
+    """Entrada con el secreto en la ruta: la firma pasa a ser opcional.
+
+    Capa 1: el segmento debe ser el VERIFY_TOKEN (si no → 404 sin efectos).
+    Capa 2: la firma solo se exige si META_APP_SECRET está configurado. Igual
+    que `/api/webhooks/wa/<token>` del CRM, que es a donde va el relay.
+    """
+    ctx: AppContext = request.app.state.ctx
+    if not is_valid_url_token(url_token, ctx.settings.verify_token):
+        return PlainTextResponse("", status_code=404)
+    body = await limited_body(request)
+    signature = request.headers.get("x-hub-signature-256")
+    secret = ctx.settings.meta_app_secret or None
+    if secret and not verify_signature(body, signature, secret):
+        logger.warning("firma inválida o ausente en el webhook — 401")
+        return JSONResponse({"error": "firma inválida"}, status_code=401)
+    return _accept(ctx, body, signature)
 
 
 async def _process(ctx: AppContext, body: bytes, signature: str | None) -> None:

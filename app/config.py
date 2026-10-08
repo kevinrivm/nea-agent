@@ -57,7 +57,9 @@ class Settings(BaseSettings):
 
     # Webhook de Meta
     verify_token: str = ""
-    meta_app_secret: str = ""  # vacío = no se verifica la firma (dev)
+    # Vacío: `/webhook` rechaza todo, y solo entra lo que llegue por
+    # `/webhook/<VERIFY_TOKEN>` (el secreto va en la ruta, sin firma).
+    meta_app_secret: str = ""
 
     # CRM (vocero-crm, bot gateway /api/bot/*)
     crm_base_url: str = "http://localhost:3000"

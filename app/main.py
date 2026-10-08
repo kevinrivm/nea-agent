@@ -70,6 +70,37 @@ class SinTokenDelWebhook(logging.Filter):
 
 logging.getLogger("httpx").addFilter(SinTokenDelWebhook())
 
+
+class SinTokenPropio(logging.Filter):
+    """Tacha el VERIFY_TOKEN de Nea en el log de accesos de uvicorn.
+
+    Con la entrada `/webhook/<VERIFY_TOKEN>` el token es el secreto que
+    protege el webhook, y uvicorn escribe la ruta y la query de cada petición:
+    sin esto quedaría en los logs en cada mensaje (ruta) y en cada handshake
+    de Meta (`hub.verify_token`).
+    """
+
+    _RUTA = re.compile(r"(/webhook/)[^/\s\"?#]+")
+    _QUERY = re.compile(r"(hub[._]verify_token=)[^&\s\"]+")
+
+    def _limpia(self, texto: str) -> str:
+        return self._QUERY.sub(r"\1***", self._RUTA.sub(r"\1***", texto))
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        # uvicorn desempaca `record.args` (cliente, método, ruta, versión,
+        # código) para dar formato: se tacha DENTRO de la tupla. Reemplazar
+        # el mensaje y dejar `args` en None le rompe el formateador.
+        if isinstance(record.args, tuple):
+            record.args = tuple(
+                self._limpia(a) if isinstance(a, str) else a for a in record.args
+            )
+        elif isinstance(record.msg, str):
+            record.msg = self._limpia(record.msg)
+        return True
+
+
+logging.getLogger("uvicorn.access").addFilter(SinTokenPropio())
+
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 
 
