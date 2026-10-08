@@ -70,6 +70,29 @@ class SinTokenDelWebhook(logging.Filter):
 
 logging.getLogger("httpx").addFilter(SinTokenDelWebhook())
 
+
+class SinTokenPropio(logging.Filter):
+    """Tacha el VERIFY_TOKEN de Nea en el log de accesos de uvicorn.
+
+    Con la entrada `/webhook/<VERIFY_TOKEN>` el token es el secreto que
+    protege el webhook, y uvicorn escribe la ruta y la query de cada petición:
+    sin esto quedaría en los logs en cada mensaje (ruta) y en cada handshake
+    de Meta (`hub.verify_token`).
+    """
+
+    _RUTA = re.compile(r"(/webhook/)[^/\s\"?#]+")
+    _QUERY = re.compile(r"(hub[._]verify_token=)[^&\s\"]+")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        mensaje = record.getMessage()
+        limpio = self._QUERY.sub(r"\1***", self._RUTA.sub(r"\1***", mensaje))
+        if limpio != mensaje:
+            record.msg, record.args = limpio, None
+        return True
+
+
+logging.getLogger("uvicorn.access").addFilter(SinTokenPropio())
+
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 
 

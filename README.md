@@ -234,7 +234,7 @@ dale a tu servidor credenciales del registro, o Coolify no podrá descargarlo.
 |---|---|---|
 | `DATABASE_URL` | El Postgres de Nea: `postgresql://usuario:clave@host:5432/nea` | Nea no arranca |
 | `VERIFY_TOKEN` | Un token que inventas tú. El mismo va en el override del webhook | Meta no puede verificar el webhook: `GET /webhook` da 403 |
-| `META_APP_SECRET` | El App Secret de tu app de Meta, el mismo del CRM | `POST /webhook` responde 401 a todo: Nea no recibe mensajes |
+| `META_APP_SECRET` | El App Secret de tu app de Meta, el mismo del CRM. Opcional solo si Meta entra por `/webhook/<VERIFY_TOKEN>` (paso 4) | `POST /webhook` responde 401 a todo: Nea no recibe mensajes |
 | `CRM_BASE_URL` | `https://crm.tu-negocio.com`, sin `/` al final | Apunta a `http://localhost:3000` |
 | `CRM_WEBHOOK_URL` | `https://crm.tu-negocio.com/api/webhooks/wa/<META_WEBHOOK_VERIFY_TOKEN del CRM>` | El relay no entrega nada: el CRM no ve los mensajes y a un contacto nuevo Nea no le contesta |
 | `CRM_BOT_API_KEY` | El `BOT_API_KEY` del CRM | El CRM contesta 401 y Nea no le contesta a nadie |
@@ -255,6 +255,15 @@ Nea recibe a Meta en `https://nea.tu-dominio.com/webhook`: `GET` para la
 verificación (con tu `VERIFY_TOKEN`) y `POST` para los eventos (la firma de
 Meta es obligatoria: sin `META_APP_SECRET`, o con la firma inválida o ausente,
 da 401).
+
+**¿No puedes dejar el App Secret en ese servidor?** Pasa cuando la app de
+Meta es tuya y el servidor es de un cliente: con ese secreto se administran
+los webhooks de toda la app. Usa la otra entrada,
+`https://nea.tu-dominio.com/webhook/<VERIFY_TOKEN>`: el secreto va en la ruta,
+como en el webhook del CRM, y la firma solo se verifica si `META_APP_SECRET`
+está puesta. Una ruta que no coincide da 404. El `VERIFY_TOKEN` tiene que
+medir 32 caracteres o más (`openssl rand -hex 32`); con uno más corto esa
+entrada no abre. En el override de abajo cambia solo la URL.
 
 Apúntalo con un **override a nivel del número de teléfono**. Meta busca a
 dónde mandar cada webhook en este orden: el override del número, el de la WABA

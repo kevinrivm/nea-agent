@@ -52,3 +52,22 @@ def test_el_relay_real_no_deja_el_token_en_el_log(caplog: pytest.LogCaptureFixtu
         httpx.post(url, content=b"{}")
     assert "s3cr3t-del-webhook" not in caplog.text
     assert "/api/webhooks/wa/***" in caplog.text
+
+
+def test_tacha_el_verify_token_de_nea_en_el_log_de_accesos() -> None:
+    from app.main import SinTokenPropio
+
+    def acceso(ruta: str) -> str:
+        registro = logging.LogRecord(
+            "uvicorn.access", logging.INFO, __file__, 1,
+            '%s - "%s %s HTTP/%s" %d', ("10.0.0.1:5000", "POST", ruta, "1.1", 200), None,
+        )
+        assert SinTokenPropio().filter(registro) is True
+        return registro.getMessage()
+
+    assert acceso("/webhook/s3cr3t-de-nea") == '10.0.0.1:5000 - "POST /webhook/*** HTTP/1.1" 200'
+    assert "s3cr3t" not in acceso(
+        "/webhook/s3cr3t-de-nea?hub.mode=subscribe&hub.verify_token=s3cr3t-de-nea&hub.challenge=1"
+    )
+    assert "s3cr3t" not in acceso("/webhook?hub.verify_token=s3cr3t-de-nea&hub.challenge=1")
+    assert acceso("/health") == '10.0.0.1:5000 - "GET /health HTTP/1.1" 200'.replace("GET", "POST")
