@@ -195,7 +195,7 @@ horneados para `/health` (`.github/workflows/imagen.yml`). Fija la etiqueta
 exacta, nunca `latest`:
 
 ```bash
-docker pull ghcr.io/kevinrivm/nea-agent:1.0.0
+docker pull ghcr.io/kevinrivm/nea-agent:1.1.0
 ```
 
 La imagen aplica las migraciones al arrancar (`migrations/*.sql`: son
@@ -205,7 +205,7 @@ idempotentes y corren todas en cada arranque) y trae su HEALTHCHECK:
 En Coolify, dentro del proyecto del CRM:
 
 1. Un **PostgreSQL** para Nea, aparte del del CRM (el CI prueba contra el 16).
-2. **+ New → Docker Image**: `ghcr.io/kevinrivm/nea-agent`, etiqueta `1.0.0`,
+2. **+ New → Docker Image**: `ghcr.io/kevinrivm/nea-agent`, etiqueta `1.1.0`,
    puerto `8000` y un dominio con https: Meta tiene que alcanzarlo.
 3. Las variables mínimas de abajo, y deploy.
 
@@ -219,8 +219,8 @@ que ese usuario pueda leerlos.
 sin ellos, `/health` dice `"version": "dev"`:
 
 ```bash
-docker build --build-arg NEA_VERSION=1.0.0 \
-  --build-arg SOURCE_COMMIT=$(git rev-parse HEAD) -t nea-agent:1.0.0 .
+docker build --build-arg NEA_VERSION=1.1.0 \
+  --build-arg SOURCE_COMMIT=$(git rev-parse HEAD) -t nea-agent:1.1.0 .
 ```
 
 O deja que la construya GitHub: con Actions encendido en tu fork, un tag
@@ -313,7 +313,7 @@ toca con esa llamada: por eso Nea va ahí.
 ### 5. Comprobar
 
 - `GET https://nea.tu-dominio.com/health` responde 200 con
-  `"version": "1.0.0"`, `"mode": "estándar"` y `relay.pendientes` en 0
+  `"version": "1.1.0"`, `"mode": "estándar"` y `relay.pendientes` en 0
   (detalle en [`/health`](#health)).
 - Escríbele al número desde uno de `ALLOWED_WA_IDS`: tu mensaje aparece en la
   bandeja del CRM y la respuesta de Nea sale desde ahí.
@@ -327,7 +327,7 @@ decide el código: es lo que mira el HEALTHCHECK de la imagen, y una cola
 atrasada no se arregla reiniciando el contenedor. No lleva secretos ni URLs.
 
 ```json
-{"status": "ok", "db": "ok", "version": "1.0.0", "commit": "a1b2c3d",
+{"status": "ok", "db": "ok", "version": "1.1.0", "commit": "a1b2c3d",
  "commitVerified": true, "mode": "estándar",
  "relay": {"pendientes": 0, "masViejoSegundos": null, "ultimoErrorEn": null}}
 ```
@@ -353,7 +353,7 @@ después se abandona y deja de contar.
 Vocero raíz 1.4.0 lee este `/health` para su tarjeta «Quién responde a tus
 clientes» (pantalla Agente) si el CRM tiene `BRAIN_HEALTH_URL` con la
 dirección interna de Nea, p. ej. `http://nea:8000/health` con el alias de red
-de Coolify. Ahí se ve «Nea · en línea · v1.0.0 · modo estándar · 0 mensajes
+de Coolify. Ahí se ve «Nea · en línea · v1.1.0 · modo estándar · 0 mensajes
 por relevar», y un aviso rojo si el agente incluido del CRM también contesta.
 
 ## Desarrollo local

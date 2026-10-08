@@ -4,21 +4,23 @@ Qué cambia en cada versión de Nea y qué hacer al actualizar. Cada tag
 `vX.Y.Z` publica la imagen `ghcr.io/kevinrivm/nea-agent:X.Y.Z` (README,
 «Instalar»).
 
-## Sin publicar
+## 1.1.0 — 2026-10-08
+
+Dos PR sobre 1.0.0: #36 y #38. Nada se rompe al actualizar.
 
 ### Nuevo
 
-- **Nea olvida las conversaciones que el CRM elimina.** En modo cloud,
+- **Nea olvida las conversaciones que el CRM elimina** (#36). En modo cloud,
   `POST /vocero/dispatch` acepta el evento `conversation.deleted` (misma
   firma que un despacho) y borra el historial, la fase, los horarios
   ofrecidos, los envíos pendientes y los despachos guardados de esa
   conversación, solo en la organización del aviso. El aviso pasa por la cola
   de despachos: un turno que esperaba termina antes, y un mensaje nuevo de la
   misma persona empieza después.
-- **Una conversación nueva del CRM no hereda memoria**, en los dos modos. Si
+- **Una conversación nueva del CRM no hereda memoria** (#36), en los dos modos. Si
   la misma persona llega con un `conversation.id` distinto del que Nea
   recordaba, el turno empieza de cero. Es lo que cubre un aviso que no llegó.
-- **Webhook con el secreto en la ruta: `/webhook/<VERIFY_TOKEN>`.** Para
+- **Webhook con el secreto en la ruta: `/webhook/<VERIFY_TOKEN>`** (#38). Para
   instalar Nea en un servidor que no debe guardar el App Secret de la app de
   Meta (un Tech Provider que despliega para sus clientes: con ese secreto se
   administran los webhooks de TODA la app). Funciona como
@@ -27,7 +29,24 @@ Qué cambia en cada versión de Nea y qué hacer al actualizar. Cada tag
   32 caracteres o más; con uno más corto esa entrada no abre. `/webhook` no
   cambia: sigue exigiendo la firma.
 - El `VERIFY_TOKEN` ya no queda en el log de accesos (ni en la ruta ni en el
-  `hub.verify_token` del handshake).
+  `hub.verify_token` del handshake) (#38).
+
+### Actualizar
+
+Basta con correr la versión nueva (`ghcr.io/kevinrivm/nea-agent:1.1.0`): no
+hay migraciones ni variables nuevas, y `/webhook` se comporta igual que en
+1.0.0.
+
+- **Si tu Nea ya recibe por `/webhook` con `META_APP_SECRET`**, no tienes que
+  cambiar nada.
+- **Si quieres quitar el App Secret de ese servidor** (modo estándar): pon un
+  `VERIFY_TOKEN` de 32 caracteres o más (`openssl rand -hex 32`), redespliega,
+  cambia el override del número a `https://nea.tu-dominio.com/webhook/<VERIFY_TOKEN>`
+  (README, «El webhook de Meta, a Nea») y, cuando un mensaje de prueba llegue,
+  vacía `META_APP_SECRET` y redespliega otra vez. El proxy puede guardar la
+  URL completa en sus propios logs, igual que con el webhook del CRM.
+- **Comprueba**: `/health` con `"version": "1.1.0"`; un mensaje de prueba
+  llega a la bandeja del CRM y Nea contesta.
 
 ## 1.0.0 — 2026-09-30
 
