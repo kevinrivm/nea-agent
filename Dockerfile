@@ -21,7 +21,7 @@ USER 10001:10001
 # guarda en NEA_BUILD_COMMIT y no en SOURCE_COMMIT a propósito: la
 # plataforma puede poner SOURCE_COMMIT en el entorno al arrancar y lo
 # pisaría, y /health ya no sabría si salió del build (verificado) o no.
-#   docker build --build-arg NEA_VERSION=1.0.0 \
+#   docker build --build-arg NEA_VERSION=1.1.0 \
 #     --build-arg SOURCE_COMMIT=$(git rev-parse HEAD) .
 ARG NEA_VERSION=dev
 ARG SOURCE_COMMIT=
