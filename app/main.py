@@ -83,11 +83,19 @@ class SinTokenPropio(logging.Filter):
     _RUTA = re.compile(r"(/webhook/)[^/\s\"?#]+")
     _QUERY = re.compile(r"(hub[._]verify_token=)[^&\s\"]+")
 
+    def _limpia(self, texto: str) -> str:
+        return self._QUERY.sub(r"\1***", self._RUTA.sub(r"\1***", texto))
+
     def filter(self, record: logging.LogRecord) -> bool:
-        mensaje = record.getMessage()
-        limpio = self._QUERY.sub(r"\1***", self._RUTA.sub(r"\1***", mensaje))
-        if limpio != mensaje:
-            record.msg, record.args = limpio, None
+        # uvicorn desempaca `record.args` (cliente, método, ruta, versión,
+        # código) para dar formato: se tacha DENTRO de la tupla. Reemplazar
+        # el mensaje y dejar `args` en None le rompe el formateador.
+        if isinstance(record.args, tuple):
+            record.args = tuple(
+                self._limpia(a) if isinstance(a, str) else a for a in record.args
+            )
+        elif isinstance(record.msg, str):
+            record.msg = self._limpia(record.msg)
         return True
 
 
