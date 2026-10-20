@@ -70,6 +70,7 @@ def _pending_send_desde_fila(row: Any) -> PendingSend:
         organization_id=row["organization_id"],
         organization_slug=row["organization_slug"],
         dispatch_id=row["dispatch_id"],
+        wa_identity=row["wa_identity"] or "",
     )
 
 
@@ -346,9 +347,12 @@ class PgStore(PgDispatchStore):
     async def due_pending_sends(self, now: datetime) -> list[PendingSend]:
         rows = await self.pool.fetch(
             """
-            SELECT * FROM pending_send
-            WHERE delivered_at IS NULL AND abandoned_at IS NULL AND next_retry_at <= $1
-            ORDER BY id
+            SELECT p.*, c.wa_identity
+            FROM pending_send p
+            LEFT JOIN bot_conversation c ON c.id = p.conversation_id
+            WHERE p.delivered_at IS NULL AND p.abandoned_at IS NULL
+              AND p.next_retry_at <= $1
+            ORDER BY p.id
             LIMIT 50
             """,
             now,

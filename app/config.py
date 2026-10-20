@@ -283,6 +283,16 @@ class Settings(BaseSettings):
         """Allowlist canonicalizada; vacía = sin restricción."""
         return self._identities(self.allowed_wa_ids)
 
+    def identidad_permitida(self, identity: str) -> bool:
+        """¿Nea le puede escribir a esta identidad? Lista vacía = a todos.
+
+        La única forma de leer ALLOWED_WA_IDS: la usan el turno, el
+        seguimiento y el reintento de envíos (032). Una identidad vacía, con
+        la lista puesta, no pasa — ante la duda, no se escribe.
+        """
+        allowed = self.allowed_identities
+        return not allowed or canonical_identity(identity) in allowed
+
     @property
     def tester_identities(self) -> frozenset[str]:
         """Quién puede correr /reset. Vacía = comando apagado."""

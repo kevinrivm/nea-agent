@@ -5,7 +5,8 @@ envío agota sus reintentos). Backoff exponencial con tope de 15 min; se
 abandona si el CRM lo rechaza con 409 (ai_paused / window_closed) o al agotar
 24 h — en ese caso se registra handoff `error` para que un humano vea la
 conversación en el CRM (incidente 2026-08-03: antes la respuesta se descartaba
-en silencio y el lead no recibía nada).
+en silencio y el lead no recibía nada). Si la identidad queda fuera de
+ALLOWED_WA_IDS (con valor), se abandona sin handoff ni intento (032).
 """
 from __future__ import annotations
 
@@ -40,6 +41,16 @@ class SenderWorker:
     async def tick(self, now: datetime | None = None) -> None:
         now = now or utcnow()
         for item in await self._ctx.store.due_pending_sends(now):
+            # La lista de permitidos manda también aquí (032): quitar a alguien
+            # de ALLOWED_WA_IDS lo saca de lo que ya estaba en cola. Es un
+            # silencio pedido, no una falla: sin handoff.
+            if not self._ctx.settings.identidad_permitida(item.wa_identity):
+                logger.info(
+                    "sender: pending %d fuera de ALLOWED_WA_IDS — abandonado",
+                    item.id,
+                )
+                await self._ctx.store.mark_pending_send_abandoned(item.id)
+                continue
             # Con quién hay que hablar para ESTA fila. En una Nea de un solo
             # negocio es siempre el mismo; en una multi-organización, el de
             # la organización que dejó el envío pendiente.

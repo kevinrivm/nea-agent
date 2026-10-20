@@ -10,7 +10,7 @@ import asyncio
 import itertools
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 from contextlib import AbstractAsyncContextManager
 from app.dispatch_store import DispatchJob, MemoryDispatchStore
 
@@ -113,6 +113,12 @@ class PendingSend:
     # Y qué despacho estaba contestando: el CRM lo exige al responder por el
     # cerebro, y cuando el worker despierta el turno ya no existe para dárselo.
     dispatch_id: str = ""
+    # A quién va. No es columna de `pending_send`: sale de su conversación al
+    # barrer la cola, para que el reintento respete ALLOWED_WA_IDS (032).
+    wa_identity: str = ""
+
+    # Campos que se leen de otra tabla y no tienen columna propia.
+    DE_OTRA_TABLA: ClassVar[frozenset[str]] = frozenset({"wa_identity"})
 
 
 @dataclass
@@ -374,11 +380,15 @@ class MemoryStore(MemoryDispatchStore):
         return pid
 
     async def due_pending_sends(self, now: datetime) -> list[PendingSend]:
-        return [
+        due = [
             p for p in sorted(self.pending_sends.values(), key=lambda p: p.id)
             if p.delivered_at is None and p.abandoned_at is None
             and p.next_retry_at <= now
         ]
+        for p in due:
+            conv = self.conversations.get(p.conversation_id)
+            p.wa_identity = conv.wa_identity if conv else ""
+        return due
 
     async def mark_pending_send_delivered(self, pending_id: int) -> None:
         self.pending_sends[pending_id].delivered_at = utcnow()

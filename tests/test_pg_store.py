@@ -199,7 +199,11 @@ async def test_cada_campo_del_modelo_tiene_su_columna(store, tabla, modelo):
     que importan: un campo nuevo sin migración se pone rojo aquí, y el mapeo
     que lee una columna que no existe se pone rojo en los viajes de abajo."""
     columnas = await _columnas(store, tabla)
-    faltan = {c.name for c in fields(modelo)} - columnas
+    faltan = (
+        {c.name for c in fields(modelo)}
+        - columnas
+        - getattr(modelo, "DE_OTRA_TABLA", frozenset())
+    )
     assert not faltan, f"{tabla} no tiene columna para {sorted(faltan)}"
 
 
@@ -454,6 +458,8 @@ async def test_el_envio_pendiente_vuelve_con_su_organizacion_y_su_despacho(store
         organization_id="org_a",
         organization_slug="negocio-a",
         dispatch_id="dsp_9",
+        # Sale de la conversación (JOIN): el reintento respeta la lista (032).
+        wa_identity=IDENTITY,
     )
 
 

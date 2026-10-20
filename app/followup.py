@@ -4,6 +4,7 @@ Loop asyncio cada 60 s. Un empujón a las `FOLLOWUP_HOURS` (default 4) si la
 fase lo amerita (hubo conversación, sin resultado, sin handoff). `followup_sent`
 se marca ANTES de enviar: a lo sumo uno, incluso con crash a media operación.
 Ventana cerrada o IA pausada → se omite con log (v1 no maneja plantillas).
+Identidad fuera de ALLOWED_WA_IDS (con valor) → se omite y queda consumido.
 """
 from __future__ import annotations
 
@@ -47,6 +48,14 @@ class FollowupWorker:
         for conv in await self._ctx.store.due_followups(now):
             # Claim atómico ANTES de enviar: jamás un segundo empujón.
             if not await self._ctx.store.claim_followup(conv.id):
+                continue
+            # Después del claim: fuera de ALLOWED_WA_IDS el empujón queda
+            # consumido, no pendiente para el barrido siguiente (032).
+            if not self._ctx.settings.identidad_permitida(conv.wa_identity):
+                logger.info(
+                    "followup %s: fuera de ALLOWED_WA_IDS — omitido",
+                    conv.wa_identity,
+                )
                 continue
             try:
                 # Mismo candado que los turnos: sin él, el empujón puede salir

@@ -237,8 +237,7 @@ async def run_turn(
     settings = ctx.settings
 
     # --- Gate 1: allowlist de pruebas (Constitución V) --------------------
-    allowed = settings.allowed_identities
-    if allowed and canonical_identity(identity) not in allowed:
+    if not settings.identidad_permitida(identity):
         logger.info(
             "allowlist: %s fuera de ALLOWED_WA_IDS — sin respuesta", identity
         )

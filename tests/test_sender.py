@@ -216,6 +216,44 @@ async def test_sender_agota_24h_abandona_y_alerta(respx_mock):
     await ctx.crm.aclose()
 
 
+# ── La lista de permitidos (032) ──────────────────────────────────────────
+
+
+async def _pendiente_con_lista(respx_mock, allowed_wa_ids: str):
+    ctx = make_ctx(make_settings(allowed_wa_ids=allowed_wa_ids))
+    conv = await ctx.store.get_or_create_conversation(IDENTITY)
+    pid = await ctx.store.enqueue_pending_send(conv.id, CRM_CONV_ID, "texto")
+    messages = respx_mock.post(f"{CRM_URL}/api/bot/messages").mock(
+        return_value=httpx.Response(200, json={"messageId": "m1"})
+    )
+    handoff = respx_mock.post(f"{CRM_URL}/api/bot/handoff").mock(
+        return_value=httpx.Response(200, json={})
+    )
+    await SenderWorker(ctx).tick()
+    await ctx.crm.aclose()
+    return ctx.store.pending_sends[pid], messages, handoff
+
+
+async def test_sender_entrega_si_la_identidad_esta_en_la_lista(respx_mock):
+    # Con el "1" de móvil: la lista se compara canonicalizada, como en el turno.
+    item, messages, _ = await _pendiente_con_lista(respx_mock, "5215550001111")
+    assert messages.call_count == 1
+    assert item.delivered_at is not None
+
+
+async def test_sender_abandona_sin_handoff_fuera_de_la_lista(respx_mock):
+    item, messages, handoff = await _pendiente_con_lista(respx_mock, "525559999999")
+    assert messages.call_count == 0  # ni se intenta
+    assert item.abandoned_at is not None
+    assert handoff.call_count == 0  # silencio pedido, no falla
+
+
+async def test_sender_con_lista_vacia_entrega_a_todos(respx_mock):
+    item, messages, _ = await _pendiente_con_lista(respx_mock, "")
+    assert messages.call_count == 1
+    assert item.delivered_at is not None
+
+
 # ── El mapeo de la fila ───────────────────────────────────────────────────
 
 
@@ -249,6 +287,7 @@ def test_el_mapeo_de_pending_send_no_se_deja_ninguna_columna():
         "organization_id": "org_a",
         "organization_slug": "negocio-a",
         "dispatch_id": "dsp_1",
+        "wa_identity": "525550001111",
     }
     pendiente = _pending_send_desde_fila(fila)
 

@@ -16,6 +16,7 @@ from tests.conftest import (
     IDENTITY,
     crm_context,
     make_ctx,
+    make_settings,
 )
 
 
@@ -134,4 +135,45 @@ async def test_followup_espera_el_turno_vivo_y_se_calla_si_el_lead_escribio(resp
     await tarea
 
     assert messages.call_count == 0  # ya hubo conversación: sin empujón
+    await ctx.crm.aclose()
+
+
+# ── La lista de permitidos (032) ──────────────────────────────────────────
+
+
+async def _seguimiento_con_lista(respx_mock, allowed_wa_ids: str):
+    ctx = make_ctx(make_settings(allowed_wa_ids=allowed_wa_ids))
+    ctx.llm.replies = [LlmReply(content="¿Seguimos donde nos quedamos? 😊")]
+    conv = await preparar_conversacion(ctx)
+    respx_mock.get(f"{CRM_URL}/api/bot/context").mock(
+        return_value=httpx.Response(200, json=crm_context())
+    )
+    messages = respx_mock.post(f"{CRM_URL}/api/bot/messages").mock(
+        return_value=httpx.Response(200, json={"messageId": "m1"})
+    )
+    worker = FollowupWorker(ctx)
+    await worker.tick()
+    return ctx, conv, worker, messages
+
+
+async def test_followup_sale_si_la_identidad_esta_en_la_lista(respx_mock):
+    ctx, _, _, messages = await _seguimiento_con_lista(respx_mock, "5215550001111")
+    assert messages.call_count == 1
+    await ctx.crm.aclose()
+
+
+async def test_followup_fuera_de_la_lista_se_omite_y_consume(respx_mock):
+    ctx, conv, worker, messages = await _seguimiento_con_lista(
+        respx_mock, "525559999999"
+    )
+    assert messages.call_count == 0
+    assert ctx.store.conversations[conv.id].followup_sent is True
+    await worker.tick()  # consumido: el barrido siguiente tampoco lo manda
+    assert messages.call_count == 0
+    await ctx.crm.aclose()
+
+
+async def test_followup_con_lista_vacia_sale_a_todos(respx_mock):
+    ctx, _, _, messages = await _seguimiento_con_lista(respx_mock, "")
+    assert messages.call_count == 1
     await ctx.crm.aclose()
