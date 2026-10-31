@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 
 import json
 from app.profile import BusinessProfile
+from app.nombre_contacto import nombre_fiable_desde_contexto
 from app.state import Conversation, OfferedSlot
 from app.tools import etapas_siguientes
 
@@ -465,8 +466,22 @@ def build_system_prompt(
 
     contact = (context or {}).get("contact") or {}
     lead = (context or {}).get("lead") or {}
-    if contact.get("name"):
-        lines.append(f"- Nombre del lead: {contact['name']}.")
+    # Solo usar el nombre de trato fiable (y tratarlo como DATO del perfil,
+    # nunca como instrucciones del lead). Sin nombre, no inventar uno.
+    trato = nombre_fiable_desde_contexto(contact)
+    if trato:
+        lines.append(f"- Nombre de trato del lead (dato del CRM): {trato}.")
+    else:
+        lines.append(
+            "- No hay nombre de trato fiable. Saluda sin nombre; no uses teléfono, "
+            "alias técnicos o nombre comercial como nombre de persona."
+        )
+    lines.append(
+        "- PERSONALIZACIÓN: cuando sepas el nombre fiable, úsalo con naturalidad, "
+        "no en cada turno. Si el lead dice cómo quiere que lo llames, respeta su "
+        "preferencia, guarda nombre_preferido mediante update_ficha y continúa "
+        "respondiendo su consulta sin volver a preguntarle el nombre."
+    )
     if lead.get("stageName"):
         lines.append(f"- Etapa en el pipeline: {lead['stageName']}.")
     # 038 — Con la herramienta encendida y a dónde ir, se le dice a qué
@@ -504,8 +519,21 @@ def build_system_prompt(
 
     if not conv.greeted:
         lines.append(
-            "- Es el PRIMER contacto: saluda transparente, gancho + UNA pregunta."
-            + (" Personaliza el saludo mencionando el anuncio." if headline else "")
+            "- Es el PRIMER contacto: "
+            + (f"saluda UNA VEZ por su nombre de trato, por ejemplo «¡Hola, {trato}!». "
+               if trato else "saluda sin mencionar ningún nombre. ")
+            + "Responde primero a la pregunta concreta del lead (por ejemplo qué hace "
+              "el negocio); después, si aporta valor, haz UNA pregunta breve. "
+              "No hagas pasar a la persona por un formulario ni obligues al "
+              "lead a repetir datos que ya conoces."
+            + (" Puedes mencionar el anuncio si es pertinente." if headline else "")
+        )
+    else:
+        lines.append(
+            "- Ya existe conversación: NO vuelvas a presentarte ni repitas "
+            "«Hola, [nombre]» como saludo automático en cada respuesta. "
+            "Mantén el contexto previo y trata al lead por su nombre solo "
+            "cuando suene natural."
         )
 
     if offered:
