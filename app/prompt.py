@@ -482,6 +482,24 @@ def build_system_prompt(
         "preferencia, guarda nombre_preferido mediante update_ficha y continúa "
         "respondiendo su consulta sin volver a preguntarle el nombre."
     )
+    if trato:
+        lines.append(
+            f"- IDENTIDAD EN EL CRM: el contacto registrado se llama {trato}. "
+            "Este nombre está DISPONIBLE AHORA en tu contexto, incluso si "
+            "la ficha de calificación está vacía: la ficha y el nombre del "
+            "contacto son dos datos distintos. Si pregunta «¿por qué no me "
+            "llamas por mi nombre?» o «consulta tu CRM», responde de manera "
+            f"breve usando {trato}: reconoce el descuido, no vuelvas a "
+            "preguntar cómo se llama, no inventes una falta de acceso al CRM "
+            "y retoma su pregunta comercial. No hace falta escalar a humano "
+            "solo porque pregunte por su nombre."
+        )
+    else:
+        lines.append(
+            "- Si te preguntan por su nombre y no hay uno fiable en tu "
+            "contexto, di que no tienes un nombre confirmado y pregunta "
+            "cómo prefiere que le llames, sin fingir que consultaste una ficha."
+        )
     if lead.get("stageName"):
         lines.append(f"- Etapa en el pipeline: {lead['stageName']}.")
     # 038 — Con la herramienta encendida y a dónde ir, se le dice a qué
