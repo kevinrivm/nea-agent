@@ -80,3 +80,22 @@ def test_se_puede_guardar_nombre_preferido() -> None:
     texto = _prompt({"name": "Daniel", "ficha": {"nombre_preferido": "Dani"}})
     assert "¡Hola, Dani!" in texto
     assert "guarda nombre_preferido mediante update_ficha" in texto
+
+def test_si_el_lead_reclama_su_nombre_se_reconoce_el_crm() -> None:
+    texto = _prompt({"name": "Daniel Castropé"}, greeted=True)
+    assert "el contacto registrado se llama Daniel" in texto
+    assert "no vuelvas a preguntar cómo se llama" in texto
+    assert "no inventes una falta de acceso al CRM" in texto
+    assert "No hace falta escalar a humano" in texto
+
+
+def test_ficha_vacia_no_elimina_el_nombre_del_contacto() -> None:
+    texto = _prompt({"name": "Daniel Castropé", "ficha": {}}, greeted=True)
+    assert "la ficha de calificación está vacía" in texto
+    assert "el contacto registrado se llama Daniel" in texto
+
+
+def test_sin_identidad_fiable_no_se_afirma_que_hay_nombre() -> None:
+    texto = _prompt({"name": "Cliente 001"}, greeted=True)
+    assert "no hay uno fiable en tu contexto" in texto
+    assert "el contacto registrado se llama" not in texto
