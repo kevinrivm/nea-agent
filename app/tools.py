@@ -1,4 +1,4 @@
-"""Herramientas del LLM: update_ficha, propose_slots, book_session, route_out, handoff.
+"""Herramientas del LLM: update_ficha, move_stage, propose_slots, book_session, route_out, handoff.
 
 Solo se reserva lo que se ofreció, y **quien manda sobre eso es el CRM**:
 Vocero guarda la oferta contra la conversación y rechaza cualquier otro
@@ -14,8 +14,9 @@ nunca tumba el turno.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from app.crm import (
     AgendaUnavailable,
@@ -24,6 +25,7 @@ from app.crm import (
     SlotNotOffered,
     SlotTaken,
 )
+from app.dias import nombra_un_dia
 from app.profile import BusinessProfile
 from app.state import AppContext, Conversation, OfferedSlot
 
@@ -34,6 +36,10 @@ logger = logging.getLogger("nea.tools")
 # ofrecer cuando el lead pedía otro día: el catálogo reservable es más ancho
 # que el menú que se enseña.
 MAX_OFFERED = 12
+# Con `fecha`, el CRM ofrece TODAS las horas de ese día (hasta 24). El espejo
+# tiene que guardarlas todas: si guardara 12, Nea rechazaría por su cuenta la
+# hora 13 que el CRM sí ofreció.
+MAX_OFFERED_DIA = 24
 # Reparto pedido al CRM: hasta 3 huecos por día, en 5 días distintos.
 OFFER_PER_DAY = 3
 OFFER_DAYS = 5
@@ -74,14 +80,31 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "function": {
             "name": "propose_slots",
             "description": (
-                "Consulta la disponibilidad real de la agenda del negocio. Te "
-                "regresa los huecos libres REPARTIDOS entre los próximos días, "
-                "cada uno con su día en palabras (hoy/mañana/nombre del día). "
-                "Ofrece al lead máximo 3, los que embonen con lo que pidió. Si "
-                "el día que pidió no aparece, es que no hay agenda ese día: "
-                "dilo. SOLO estos horarios serán reservables después."
+                "Consulta la disponibilidad real de la agenda del negocio. Sin "
+                "fecha te regresa un REPARTO: unas horas de cada uno de los "
+                "próximos días, con su día en palabras (hoy/mañana/nombre del "
+                "día). Con fecha te regresa TODAS las horas libres de ese día, "
+                "o por qué no hay (cerrado, lleno, aún sin agenda). Si el lead "
+                "pide un día u hora que no viene en el reparto, consúltalo con "
+                "fecha antes de contestar. SOLO los horarios de la última "
+                "consulta con resultados serán reservables."
             ),
-            "parameters": {"type": "object", "properties": {}},
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "fecha": {
+                        "type": "string",
+                        "description": (
+                            "Opcional, y SOLO si el lead nombró un día (\"el "
+                            "jueves\", \"mañana\", \"el 20\"). En AAAA-MM-DD, "
+                            "calculado con la fecha de hoy del contexto (\"el "
+                            "jueves de la próxima semana\" → su fecha). Si solo "
+                            "pregunta cuándo se puede, va SIN fecha: el reparto "
+                            "ya empieza hoy."
+                        ),
+                    }
+                },
+            },
         },
     },
     {
@@ -174,11 +197,107 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
 ]
 
 
+# 038 — Mover al lead de etapa. No va en TOOL_SCHEMAS: solo existe cuando el
+# contexto del turno trae `lead.nextStages` con algo (un CRM sin
+# `POST /api/bot/stage`, como cloud o un raíz anterior, no manda la llave), y
+# así el modelo no puede pedir una etapa que el CRM no le dio.
+MOVE_STAGE_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "move_stage",
+        "description": (
+            "Avanza al lead en el pipeline del negocio. Llámala en el MISMO "
+            "turno en que contestas (junto con tus otras herramientas) en "
+            "cuanto el lead dijo qué necesita o para qué lo quiere, o pidió "
+            "avanzar: precio, contratar, empezar, agendar o una cita. No la "
+            "llames por un saludo, un «ok» ni una duda suelta sin intención. "
+            "Solo a una de las etapas que el contexto dice que puedes usar: la "
+            "que por su nombre mejor describa dónde va el lead. Es interno: no "
+            "se lo anuncies al lead."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "etapa": {
+                    "type": "string",
+                    "description": "Nombre de la etapa, tal cual aparece en el contexto",
+                }
+            },
+            "required": ["etapa"],
+        },
+    },
+}
+
+
+def etapas_siguientes(context: dict[str, Any] | None) -> list[str]:
+    """Los nombres de `lead.nextStages` del contexto (038); vacía si no vienen."""
+    lead = (context or {}).get("lead") or {}
+    crudas = lead.get("nextStages")
+    if not isinstance(crudas, list):
+        return []
+    return [
+        e["name"].strip()
+        for e in crudas
+        if isinstance(e, dict) and isinstance(e.get("name"), str) and e["name"].strip()
+    ]
+
+
+def con_mover_etapa(schemas: list[dict[str, Any]], etapas: list[str]) -> list[dict[str, Any]]:
+    """El catálogo del turno más `move_stage` si hay a dónde mover."""
+    return schemas + [MOVE_STAGE_SCHEMA] if etapas else schemas
+
+
+# Recordatorios de la cita: SOLO los manda la agenda v2 de Vocero Cloud. El
+# CRM raíz no tiene recordatorios, y con este campo obligatorio en su
+# book_session el modelo, para llenarlo, le preguntaba al lead «¿te mando un
+# recordatorio antes de la sesión?» — una promesa que nadie iba a cumplir
+# (e2e contra raíz, escenario 4). Sin la capacidad, el campo no existe.
+RECORDATORIOS_ACEPTADOS = {
+    "type": "boolean",
+    "description": (
+        "true SOLO si el lead autorizó explícitamente recibir "
+        "recordatorios de ESTA cita. Reservar o confirmar el "
+        "horario no implica permiso. Si no lo dijo o lo rechazó, false."
+    ),
+}
+
+AGENDA_V2_SCHEMAS = [
+    {"type": "function", "function": {"name": "list_bookings", "description": "Consulta las citas activas de esta conversación. Muestra sus etiquetas y pide elegir y confirmar antes de mover o cancelar. Nunca inventes una selección.", "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {"name": "cancel_session", "description": "Cancela la cita seleccionada SOLO después de confirmación explícita del cliente. Usa el selectionToken devuelto por list_bookings.", "parameters": {"type": "object", "properties": {"selection_token": {"type": "string"}, "confirmation": {"type": "boolean"}}, "required": ["selection_token", "confirmation"]}}},
+]
+
 # Herramientas que solo tienen sentido si el CRM agenda.
 AGENDA_TOOLS = frozenset({"propose_slots", "book_session", "reschedule_session"})
 
+# 034 — De qué clave del catálogo del CRM es cada herramienta. Una que no esté
+# aquí no se puede apagar desde el CRM.
+CLAVE_DE_HERRAMIENTA = {
+    "update_ficha": "ficha",
+    "move_stage": "etapa",
+    "propose_slots": "agendar",
+    "book_session": "agendar",
+    "list_bookings": "agendar",
+    "cancel_session": "agendar",
+    "coordination_consent": "agendar",
+    "reschedule_session": "reprogramar",
+    "route_out": "salida",
+    "handoff": "escalar",
+}
 
-def tool_schemas(agenda_enabled: bool = True) -> list[dict[str, Any]]:
+
+def solo_encendidas(schemas: list[dict[str, Any]], profile: Any) -> list[dict[str, Any]]:
+    """Las herramientas que el perfil deja encendidas (034)."""
+    permite = getattr(profile, "permite", None)
+    if not callable(permite):
+        return schemas
+    return [
+        t
+        for t in schemas
+        if permite(CLAVE_DE_HERRAMIENTA.get(t.get("function", {}).get("name", ""), "escalar"))
+    ]
+
+
+def tool_schemas(agenda_enabled: bool = True, agenda_v2: bool = False, coordination: bool = False) -> list[dict[str, Any]]:
     """El catálogo que se le ofrece al modelo en ESTE turno.
 
     Contra un CRM sin agenda no se le enseñan las herramientas de agendar: si
@@ -187,6 +306,19 @@ def tool_schemas(agenda_enabled: bool = True) -> list[dict[str, Any]]:
     prompt que se acuerde de no usarla.
     """
     if agenda_enabled:
+        if agenda_v2:
+            import copy
+            schemas = copy.deepcopy(TOOL_SCHEMAS)
+            for tool in schemas:
+                if tool["function"]["name"] == "book_session":
+                    params = tool["function"]["parameters"]
+                    params["properties"]["recordatorios_aceptados"] = dict(RECORDATORIOS_ACEPTADOS)
+                    params["required"].append("recordatorios_aceptados")
+                if tool["function"]["name"] == "reschedule_session":
+                    params = tool["function"]["parameters"]
+                    params["properties"]["selection_token"] = {"type": "string", "description": "Token de list_bookings de la cita elegida y confirmada por el cliente"}
+                    params["required"].append("selection_token")
+            return schemas + AGENDA_V2_SCHEMAS + ([{"type": "function", "function": {"name": "coordination_consent", "description": "Registra consentimiento EXPLÍCITO para un único recordatorio de coordinación tras 24 horas sin reservar. Nunca deduzcas consentimiento por pedir una cita. consent=false si rechaza seguimiento. Solo tras ofrecer horarios.", "parameters": {"type": "object", "properties": {"consent": {"type": "boolean"}}, "required": ["consent"]}}}] if coordination else [])
         return TOOL_SCHEMAS
     return [
         t
@@ -243,12 +375,56 @@ def _label_of(raw: dict[str, Any], start: datetime) -> str:
     return str(raw.get("label") or _iso_z(start))
 
 
+def _fecha_pedida(value: Any) -> str | None:
+    """AAAA-MM-DD válida, o None. El modelo a veces manda "jueves" o "17/09"."""
+    texto = str(value or "").strip()
+    try:
+        return date.fromisoformat(texto).isoformat() if len(texto) == 10 else None
+    except ValueError:
+        return None
+
+
+def _cobertura(query: dict[str, Any] | None) -> dict[str, Any]:
+    """Qué decirle al modelo de lo que NO viene en el reparto.
+
+    Antes se le decía "esta es TODA la agenda: los días que no aparecen NO
+    tienen agenda". No era cierto —el reparto son unas horas de unos cuantos
+    días— y en Tobaxis sonó así: "la próxima semana jueves o viernes ya no
+    tienen agenda" (no se habían consultado) y "el jueves a las 11 no hay"
+    (solo veía las 3 primeras horas del día).
+    """
+    base = (
+        "Ofrécele máximo 3, con su etiqueta tal cual (día incluido), los que "
+        "embonen con lo que pidió. Esta lista es un REPARTO, no toda la agenda: "
+        "si pide un día u hora que no ves aquí, llama propose_slots con "
+        "fecha=AAAA-MM-DD ANTES de contestarle. Nunca digas que un día u hora "
+        "no tiene agenda sin haber consultado ese día."
+    )
+    if not query:
+        return {"instrucciones": base}
+    out: dict[str, Any] = {"instrucciones": base}
+    if query.get("coveredUntil"):
+        out["revisado_hasta"] = query["coveredUntil"]
+        out["instrucciones"] += (
+            f" Los días posteriores al {query['coveredUntil']} NO se revisaron."
+        )
+    if query.get("perDay"):
+        out["instrucciones"] += (
+            f" De cada día solo ves hasta {query['perDay']} horas; puede haber más."
+        )
+    if query.get("horizonEnd"):
+        out["se_agenda_hasta"] = query["horizonEnd"]
+    return out
+
+
 def _slots_from_payload(
-    conversation_id: int, raw_slots: list[dict[str, Any]]
+    conversation_id: int,
+    raw_slots: list[dict[str, Any]],
+    limit: int = MAX_OFFERED,
 ) -> list[OfferedSlot]:
     """Convierte slots del CRM ({startUtc,endUtc,label}) a OfferedSlot, tolerante."""
     out: list[OfferedSlot] = []
-    for raw in raw_slots[:MAX_OFFERED]:
+    for raw in raw_slots[:limit]:
         start = _parse_utc(str(raw.get("startUtc") or ""))
         if start is None:
             continue
@@ -264,6 +440,18 @@ def _slots_from_payload(
     return out
 
 
+def _zona_del_negocio(ctx: AppContext) -> ZoneInfo:
+    """La zona de AGENT_TIMEZONE, o CDMX si no es válida.
+
+    Es el respaldo: el turno le pasa a `ToolRuntime` la zona que el CRM manda
+    para ese negocio (`zona_del_negocio`, app/prompt.py).
+    """
+    try:
+        return ZoneInfo(getattr(ctx.settings, "agent_timezone", "") or "America/Mexico_City")
+    except Exception:
+        return ZoneInfo("America/Mexico_City")
+
+
 def _slots_for_llm(slots: list[OfferedSlot]) -> list[dict[str, str]]:
     return [{"start_utc": _iso_z(s.start_utc), "label": s.label} for s in slots]
 
@@ -277,23 +465,46 @@ class ToolRuntime:
         conv: Conversation,
         crm_conversation_id: str,
         profile: BusinessProfile | None = None,
+        tz: ZoneInfo | None = None,
+        conversacion_reciente: str | None = None,
+        etapas: list[str] | None = None,
     ) -> None:
         self._ctx = ctx
+        # 038 — A qué etapas puede mover al lead (`lead.nextStages`).
+        self.etapas: list[str] = list(etapas or [])
+        # Lo último que se dijo en la conversación (app/dias.py). None ⇒ no
+        # se sabe, y la fecha del modelo pasa sin revisar.
+        self._conversacion_reciente = conversacion_reciente
         self._conv = conv
         self._crm_conv_id = crm_conversation_id
         self._profile = profile or BusinessProfile()
+        self._tz = tz or _zona_del_negocio(ctx)
         # Efectos observables por turn.py:
         self.handoff_reason: str | None = None  # se ejecuta DESPUÉS de la despedida
         self.booked = False
+        self.booking_confirmation: dict[str, Any] | None = None
         self.routed_out = False
         self.proposed = False
+        self.etapa_movida: str | None = None
 
     async def execute(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         try:
+            if name == "coordination_consent" and getattr(self._ctx.crm, "supports_coordination", False):
+                if not isinstance(args.get("consent"), bool):
+                    return {"ok": False, "error": "explicit_consent_required"}
+                return await self._ctx.crm.set_coordination_consent(self._crm_conv_id, args["consent"])
+            if name == "list_bookings" and getattr(self._ctx.crm, "supports_agenda_v2", False):
+                return {"ok": True, "bookings": await self._ctx.crm.list_bookings(self._crm_conv_id)}
+            if name == "cancel_session" and getattr(self._ctx.crm, "supports_agenda_v2", False):
+                if args.get("confirmation") is not True or not args.get("selection_token"):
+                    return {"ok": False, "error": "confirmation_required"}
+                return await self._ctx.crm.cancel_booking(self._crm_conv_id, str(args["selection_token"]), True)
             if name == "update_ficha":
                 return await self._update_ficha(args)
+            if name == "move_stage":
+                return await self._move_stage(args)
             if name == "propose_slots":
-                return await self._propose_slots()
+                return await self._propose_slots(args)
             if name == "book_session":
                 return await self._book_session(args)
             if name == "reschedule_session":
@@ -320,19 +531,60 @@ class ToolRuntime:
         await self._ctx.crm.put_ficha(self._crm_conv_id, ficha)
         return {"ok": True}
 
-    async def _propose_slots(self) -> dict[str, Any]:
+    async def _move_stage(self, args: dict[str, Any]) -> dict[str, Any]:
+        etapa = str(args.get("etapa") or "").strip()
+        if not etapa:
+            return {"ok": False, "error": "falta_etapa", "etapas": self.etapas}
+        try:
+            data = await self._ctx.crm.move_stage(self._crm_conv_id, etapa)
+        except CrmConflict as exc:
+            # El CRM manda la regla (solo hacia adelante, herramienta
+            # encendida): su mensaje dice a dónde sí, y con eso se corrige.
+            error = exc.payload.get("error")
+            detalle = error.get("message") if isinstance(error, dict) else None
+            return {"ok": False, "error": exc.code, "detalle": detalle or "no se movió"}
+        movida = ((data or {}).get("lead") or {}).get("stageName") or etapa
+        self.etapa_movida = movida
+        return {"ok": True, "etapa": movida, "nota": "hecho; no se lo anuncies al lead"}
+
+    async def _propose_slots(self, args: dict[str, Any]) -> dict[str, Any]:
+        fecha = _fecha_pedida(args.get("fecha"))
+        if args.get("fecha") and fecha is None:
+            return {
+                "ok": False,
+                "error": "fecha_invalida",
+                "detalle": "fecha va como AAAA-MM-DD (p. ej. 2026-09-17); vuelve a llamar",
+            }
+        fecha_ignorada: str | None = None
+        if (
+            fecha
+            and self._conversacion_reciente is not None
+            and not nombra_un_dia(self._conversacion_reciente)
+        ):
+            # Nadie nombró un día: el reparto empieza hoy. Ver app/dias.py.
+            logger.info(
+                "tools: propose_slots con fecha=%s sin que el lead nombrara un "
+                "día — consulto el reparto",
+                fecha,
+            )
+            fecha_ignorada, fecha = fecha, None
         # La conversación va SIEMPRE: es contra ella que el CRM registra la
         # oferta, y sin ella no hay nada reservable después.
         try:
-            raw = await self._ctx.crm.get_availability(
+            consulta = await self._ctx.crm.consultar_huecos(
                 self._crm_conv_id,
+                date=fecha,
                 limit=MAX_OFFERED,
                 per_day=OFFER_PER_DAY,
                 days=OFFER_DAYS,
             )
         except AgendaUnavailable:
             return self._sin_agenda()
-        slots = _slots_from_payload(self._conv.id, raw)
+        query = consulta.get("query") if isinstance(consulta.get("query"), dict) else None
+        if fecha:
+            return await self._huecos_del_dia(fecha, consulta["slots"], query)
+
+        slots = _slots_from_payload(self._conv.id, consulta["slots"])
         if not slots:
             return {
                 "ok": False,
@@ -341,17 +593,147 @@ class ToolRuntime:
             }
         await self._ctx.store.replace_offered_slots(self._conv.id, slots)
         self.proposed = True
-        return {
+        resultado = {
             "ok": True,
             "slots": _slots_for_llm(slots),
             "dias_con_agenda": sorted(
                 {s.label.rsplit(",", 1)[0].strip() for s in slots}
             ),
+            **_cobertura(query),
+        }
+        if fecha_ignorada:
+            resultado["fecha_no_consultada"] = fecha_ignorada
+            resultado["instrucciones"] = (
+                f"No consulté el {fecha_ignorada}: el lead no pidió un día. Este "
+                "es el reparto desde HOY. Ofrécele los más próximos, empezando "
+                "por hoy si hay. " + resultado["instrucciones"]
+            )
+        return resultado
+
+    async def _huecos_del_dia(
+        self, fecha: str, raw: list[dict[str, Any]], query: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        """Un día concreto: todas sus horas, o por qué no hay ninguna.
+
+        Un CRM que no conoce `date` la ignora y devuelve el reparto de
+        siempre; eso se nota porque no regresa `query.date`. Entonces el día
+        NO se consultó, y decirle al lead "ese día no hay" sería mentirle.
+        """
+        if not query or query.get("date") != fecha:
+            return await self._dia_no_consultado(fecha, raw)
+        status = query.get("status")
+        slots = _slots_from_payload(self._conv.id, raw, limit=MAX_OFFERED_DIA)
+        if status == "available" and slots:
+            horas = [s.label.rsplit(",", 1)[-1].strip() for s in slots]
+            await self._ctx.store.replace_offered_slots(self._conv.id, slots)
+            self.proposed = True
+            return {
+                "ok": True,
+                "fecha": fecha,
+                # La lista corta de horas va aparte a propósito: en la
+                # autoprueba, con las 11:00 dentro de `slots`, el modelo
+                # contestó "a las 11 no tengo espacio". Leer "11:00" en una
+                # lista de horas no se presta a esa confusión.
+                "horas_libres": horas,
+                "slots": _slots_for_llm(slots),
+                "instrucciones": (
+                    f"horas libres del {fecha} (hora del negocio): "
+                    f"{', '.join(horas)}. Si la hora que pidió ESTÁ en esa "
+                    "lista, SÍ está libre: ofrécesela. Si no está, dilo y "
+                    "ofrécele las más cercanas de esa lista, con su etiqueta tal "
+                    "cual. Máximo 3. Para reservar usa el start_utc del slot "
+                    "(viene en UTC, no se lo digas al lead)."
+                ),
+            }
+        # Sin horas ese día. La oferta anterior se conserva (igual que en el
+        # CRM): lo que ya se le ofreció sigue siendo reservable.
+        motivo = {
+            "closed": f"el {fecha} el negocio no abre",
+            "full": f"el {fecha} ya no quedan horarios libres",
+            "past": f"el {fecha} ya pasó; confirma qué día quiso decir",
+            "beyond_horizon": (
+                f"todavía no se abre agenda para el {fecha} (se agenda hasta el "
+                f"{query.get('horizonEnd')}). Dilo así — no es que esté lleno — y "
+                "ofrécele lo más lejano que sí haya o que te escriba más cerca de la fecha"
+            ),
+        }.get(str(status), f"el {fecha} no tiene horarios libres")
+        return {
+            "ok": False,
+            "error": "dia_sin_horarios",
+            "fecha": fecha,
+            "estado": status,
+            "detalle": (
+                f"{motivo}. Díselo derecho y ofrécele otro día — NUNCA acomodes "
+                "su petición en otro día como si fuera lo mismo."
+            ),
+        }
+
+    async def _dia_no_consultado(
+        self, fecha: str, raw: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        """El CRM ignoró `fecha` (un raíz de antes de la consulta por día).
+
+        Contestó con el reparto de siempre —unas horas de unos cuantos días—
+        y lo registró como la oferta de esta conversación. En el e2e contra
+        raíz, con solo las mañanas a la vista, el agente le dijo al lead
+        «mañana solo tengo por la mañana»: eso no lo sabe nadie. Se le da lo
+        que SÍ ve, dicho como lo que es (una parte), y el espejo queda igual
+        que la oferta que el CRM acaba de registrar.
+        """
+        tz = self._tz
+        del_dia: list[OfferedSlot] = []
+        otros: list[OfferedSlot] = []
+        for crudo in raw[:MAX_OFFERED]:
+            convertido = _slots_from_payload(self._conv.id, [crudo])
+            if not convertido:
+                continue
+            slot = convertido[0]
+            dia = str(crudo.get("dayIso") or "") or slot.start_utc.astimezone(tz).strftime("%Y-%m-%d")
+            (del_dia if dia == fecha else otros).append(slot)
+        slots = del_dia + otros
+        if not slots:
+            return {
+                "ok": False,
+                "error": "consulta_por_dia_no_disponible",
+                "fecha": fecha,
+                "detalle": (
+                    f"No pude revisar el {fecha} y ahora no veo horarios. NO digas "
+                    "que ese día no hay agenda ni que está lleno: no lo sabes. "
+                    "Ofrécele que el equipo le confirme el horario (handoff)."
+                ),
+            }
+        await self._ctx.store.replace_offered_slots(self._conv.id, slots)
+        self.proposed = True
+        if del_dia:
+            horas = [s.label.rsplit(",", 1)[-1].strip() for s in del_dia]
+            visto = (
+                f"Del {fecha} veo {', '.join(horas)}, pero son solo ALGUNAS horas: "
+                "puede haber más libres ese día que no veo. "
+            )
+        else:
+            horas = []
+            visto = (
+                f"Del {fecha} no veo ninguna hora en esta lista, y eso NO quiere "
+                "decir que no haya. "
+            )
+        return {
+            "ok": True,
+            "fecha": fecha,
+            "consulta_por_dia": "no_disponible",
+            "horas_que_veo_de_ese_dia": horas,
+            "slots": _slots_for_llm(slots),
             "instrucciones": (
-                "esta es TODA la agenda abierta: los días que no aparecen aquí "
-                "NO tienen agenda, dilo en vez de mover al lead a otro día. "
-                "Ofrécele máximo 3, con su etiqueta tal cual (día incluido), "
-                "los que embonen con lo que pidió."
+                f"No pude revisar el {fecha} completo: solo veo unas horas "
+                "sueltas de unos cuantos días, NO toda la agenda. "
+                + visto
+                + "Dile qué horarios SÍ ves (máximo 3, con su etiqueta tal cual; "
+                "primero los de ese día) y pregúntale si le acomoda alguno. Si "
+                "pidió una hora o una franja que no está en la lista (la tarde, "
+                "por ejemplo), NO des a entender que ese día no la hay —ni «solo "
+                "hay en la mañana», ni «¿prefieres otro día para la tarde?»—: "
+                "ofrécele que el equipo le confirme esa hora (handoff) o revisar "
+                "otro día. NUNCA digas que ese día solo hay mañana o tarde, que a "
+                "cierta hora no hay, ni que está lleno: no lo sabes."
             ),
         }
 
@@ -401,9 +783,22 @@ class ToolRuntime:
         return chosen, None
 
     def _sin_agenda(self) -> dict[str, Any]:
-        """Este CRM no tiene agenda: dejar de prometer citas, no reintentar."""
+        """Este CRM no tiene agenda: dejar de prometer citas, no reintentar.
+
+        No es para siempre. La bandera AGENDA se enciende y se apaga en el CRM
+        sin avisarle a Nea: se apaga en este turno y en la sonda, que vuelve a
+        preguntar cuando vence su TTL (app/agenda.py). Antes se quedaba
+        apagada hasta reiniciar el proceso. Solo llega aquí el 404 VACÍO de la
+        bandera; el que trae el sobre de error del CRM es un fallo normal de
+        la petición (ver `_agenda_apagada` en app/crm.py).
+        """
         self._ctx.agenda_enabled = False
-        logger.info("tools: el CRM no expone agenda — agendamiento desactivado")
+        sonda = getattr(self._ctx, "agenda_sonda", None)
+        if sonda is not None:
+            sonda.marcar_apagada()
+        logger.info(
+            "tools: el CRM no expone agenda — agendamiento desactivado hasta la próxima sonda"
+        )
         return {
             "ok": False,
             "error": "sin_agenda",
@@ -454,9 +849,15 @@ class ToolRuntime:
         if error is not None or chosen is None:
             return error or {"ok": False, "error": "slot_no_ofrecido"}
         try:
-            result = await self._ctx.crm.create_booking(
-                self._crm_conv_id, _iso_z(chosen.start_utc)
-            )
+            consent = args.get("recordatorios_aceptados") is True
+            if getattr(self._ctx.crm, "supports_agenda_v2", False):
+                result = await self._ctx.crm.create_booking(
+                    self._crm_conv_id, _iso_z(chosen.start_utc), reminder_consent=consent
+                )
+            else:
+                result = await self._ctx.crm.create_booking(
+                    self._crm_conv_id, _iso_z(chosen.start_utc)
+                )
         except SlotTaken as exc:
             # El slot se ocupó entre oferta y elección: alternativas frescas.
             fresh = _slots_from_payload(self._conv.id, exc.slots)
@@ -473,6 +874,13 @@ class ToolRuntime:
             return self._sin_agenda()
         await self._ctx.store.clear_offered_slots(self._conv.id)
         self.booked = True
+        meeting_url, link_pending = _meeting(result)
+        self.booking_confirmation = {
+            "label": chosen.label or result.get("label"),
+            "meeting_url": meeting_url,
+            "link_pending": link_pending,
+            "reminder_consent": bool(result.get("reminderConsent", False)),
+        }
         try:
             await self._ctx.crm.put_ficha(
                 self._crm_conv_id, {"calificado": True, "resultado": "agendo"}
@@ -484,8 +892,9 @@ class ToolRuntime:
             # La etiqueta del slot ofrecido trae el día en palabras; la del
             # CRM es la corta. Se repite ESTA para que el lead lea el día.
             "label": chosen.label or result.get("label"),
-            "meeting_url": _meeting(result)[0],
-            "enlace_pendiente": _meeting(result)[1],
+            "meeting_url": meeting_url,
+            "enlace_pendiente": link_pending,
+            "recordatorios_activados": bool(result.get("reminderConsent", False)),
             "instrucciones": (
                 "confirma el día COMPLETO y la hora tal cual dice label, "
                 "comparte meeting_url si viene y menciona lo que el negocio "
@@ -495,14 +904,41 @@ class ToolRuntime:
             ),
         }
 
+    def finalize_reply(self, text: str) -> str:
+        """Booking confirmation is authoritative, not left to model wording.
+
+        El enlace se nombra neutro: la reunión la entrega un conector (Zoom,
+        Google Meet o la sala fija del negocio) y ninguno de los dos CRM dice
+        cuál — `/api/bot/bookings` manda `meetingLink` a secas y
+        `/api/brains/agenda/book` tampoco trae el proveedor del enlace (los
+        `deliveryStates` del contrato v2 son la sincronización con calendario
+        y Zoom, no de dónde es el enlace). Decir "Zoom" a quien le llegó un
+        Meet es justo la clase de dato inventado que el agente no dice.
+        """
+        data = self.booking_confirmation
+        if not data:
+            return text
+        label = data.get("label") or "el horario acordado"
+        parts = [f"Listo, tu cita quedó confirmada para {label}."]
+        if data.get("meeting_url"):
+            parts.append(f"Enlace de la reunión: {data['meeting_url']}")
+        elif data.get("link_pending"):
+            parts.append("El enlace de la videollamada te llegará por aquí en un momento.")
+        if data.get("reminder_consent"):
+            parts.append("También quedaron activados los recordatorios que autorizaste.")
+        return "\n\n".join(parts)
+
     async def _reschedule_session(self, args: dict[str, Any]) -> dict[str, Any]:
         chosen, error = await self._resolve_offered(args, "reschedule_session")
         if error is not None or chosen is None:
             return error or {"ok": False, "error": "slot_no_ofrecido"}
         try:
-            result = await self._ctx.crm.reschedule_booking(
-                self._crm_conv_id, _iso_z(chosen.start_utc)
-            )
+            if getattr(self._ctx.crm, "supports_agenda_v2", False):
+                if not args.get("selection_token"):
+                    return {"ok": False, "error": "selection_required", "detalle": "consulta list_bookings y pide elegir la cita antes de mover"}
+                result = await self._ctx.crm.reschedule_booking(self._crm_conv_id, _iso_z(chosen.start_utc), selection_token=str(args["selection_token"]))
+            else:
+                result = await self._ctx.crm.reschedule_booking(self._crm_conv_id, _iso_z(chosen.start_utc))
         except SlotTaken as exc:
             fresh = _slots_from_payload(self._conv.id, exc.slots)
             await self._ctx.store.replace_offered_slots(self._conv.id, fresh)

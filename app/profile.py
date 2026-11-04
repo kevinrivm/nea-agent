@@ -39,6 +39,8 @@ class BusinessProfile:
     """Todo lo que el negocio configura del agente. Solo texto plano: el
     chasis decide dónde va cada pieza dentro del system prompt."""
 
+    cloud: bool = False
+    config_version: int = 1
     agent_name: str = "Nea"
     tone: str | None = None
     instructions: str | None = None
@@ -46,6 +48,22 @@ class BusinessProfile:
     greeting: str | None = None
     kb_text: str | None = None
     resources: list[dict[str, str]] = field(default_factory=list)
+    # 034 — El rol y las herramientas encendidas (claves del catálogo del CRM:
+    # ficha, agendar, reprogramar, salida, escalar). `None` = todas, como un
+    # CRM que todavía no las manda.
+    role: str = "calificador"
+    tools: frozenset[str] | None = None
+    # 036 — Con qué piensa el negocio cuando Nea piensa por el CRM (bloque
+    # `llm` del perfil): la ruta del proxy y el modelo de Ajustes → IA. `None`
+    # = el CRM no tiene IA configurada, o no lo dice (un CRM anterior, el
+    # brief local): Nea usa `LLM_MODEL`.
+    llm_path: str | None = None
+    llm_model: str | None = None
+
+    def permite(self, clave: str) -> bool:
+        """¿Está encendida esta herramienta? `escalar` siempre lo está: es la
+        red de seguridad (quien pide una persona, la hostilidad)."""
+        return self.tools is None or clave == "escalar" or clave in self.tools
 
     @property
     def has_knowledge(self) -> bool:
@@ -65,6 +83,8 @@ def profile_from_payload(payload: dict[str, Any], default_name: str) -> Business
         if isinstance(r, dict) and r.get("url")
     ]
     return BusinessProfile(
+        cloud=prof.get("cloud") is True,
+        config_version=int(prof.get("configVersion") or 1),
         agent_name=str(prof.get("name") or default_name),
         tone=prof.get("tone") or None,
         instructions=prof.get("instructions") or None,
@@ -72,7 +92,33 @@ def profile_from_payload(payload: dict[str, Any], default_name: str) -> Business
         greeting=prof.get("greeting") or None,
         kb_text=kb_text,
         resources=resources,
+        role=str(prof.get("role") or "calificador"),
+        tools=_herramientas(prof.get("tools")),
+        **_ia(payload.get("llm")),
     )
+
+
+def _ia(valor: Any) -> dict[str, str | None]:
+    """El bloque `llm` del perfil (036): `{path, model}` o `null`.
+
+    La ruta solo se acepta si es una ruta (`/…`): se pega detrás de
+    `CRM_BASE_URL`, y otra cosa cambiaría el host al que viaja la llave.
+    """
+    if not isinstance(valor, dict):
+        return {"llm_path": None, "llm_model": None}
+    path = valor.get("path")
+    model = valor.get("model")
+    return {
+        "llm_path": path if isinstance(path, str) and path.startswith("/") else None,
+        "llm_model": (model.strip() or None) if isinstance(model, str) else None,
+    }
+
+
+def _herramientas(valor: Any) -> frozenset[str] | None:
+    """Las claves que manda el CRM; sin lista (un CRM viejo), todas."""
+    if not isinstance(valor, list):
+        return None
+    return frozenset(str(v) for v in valor if isinstance(v, str))
 
 
 def profile_from_brief(path: Path, default_name: str) -> BusinessProfile | None:
@@ -115,7 +161,7 @@ class ProfileProvider:
 
     async def get(self) -> BusinessProfile:
         now = time.monotonic()
-        if self._cached is not None and (now - self._fetched_at) < self._ttl:
+        if self._cached is not None and not self._cached.cloud and (now - self._fetched_at) < self._ttl:
             return self._cached
 
         payload = None

@@ -19,18 +19,23 @@ cambia por que este archivo exista.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 from typing import Any
 
 import httpx
 
 from app.crm import (
-    AgendaUnavailable,
     CrmClient,
     CrmConflict,
     CrmError,
+    CrmUnreachable,
+    _404_de_agenda,
+    es_caida,
+    _agenda_apagada,
     _booking_conflict,
     _conflict_code,
+    _payload,
 )
 
 logger = logging.getLogger("nea.crm.brains")
@@ -47,8 +52,17 @@ RUTAS = {
     "/api/bot/bookings": "/api/brains/agenda/book",
 }
 
+# Las rutas con un identificador al final no pueden vivir en ``RUTAS``: el
+# valor concreto (por ejemplo el id de Meta) cambia en cada petición. Mantener
+# el prefijo explícito evita que el cliente cloud herede accidentalmente la
+# superficie ``/api/bot`` y sea rechazado antes de descargar el adjunto.
+RUTAS_POR_PREFIJO = {
+    "/api/bot/media/": "/api/brains/media/",
+}
+
 
 class BrainsCrmClient(CrmClient):
+    media_path = "/api/brains/media/"
     def __init__(
         self,
         base_url: str,
@@ -71,6 +85,8 @@ class BrainsCrmClient(CrmClient):
         # Y qué despacho se está contestando en cada conversación: el CRM lo
         # exige al responder, para no mandar dos veces lo mismo si reintenta.
         self._despachos: dict[str, str] = {}
+        self._envelopes: dict[str, dict[str, Any]] = {}
+        self.supports_agenda_v2 = False
         # El perfil viaja DENTRO del contexto en esta superficie. Se guarda al
         # pedirlo para que `get_profile()` no gaste una llamada de más por
         # turno — y para que el perfil sea el de la conversación que se está
@@ -104,6 +120,38 @@ class BrainsCrmClient(CrmClient):
         if dispatch_id:
             self._despachos[conversation_id] = dispatch_id
 
+    def registrar_envelope(self, conversation_id: str, payload: dict[str, Any]) -> None:
+        self.supports_agenda_v2 = "agenda_v2" in payload.get("capabilities", [])
+        if self.supports_agenda_v2:
+            self._envelopes[conversation_id] = {"dispatchId": payload.get("dispatchId"), "brainGeneration": payload.get("brainGeneration")}
+
+    async def set_coordination_consent(self, conversation_id: str, consent: bool) -> dict[str, Any]:
+        response = await self._request("POST", "/api/brains/agenda/followup", json={"conversationId": conversation_id, "consent": consent, **self._envelopes.get(conversation_id, {})})
+        if not response.is_success:
+            raise CrmConflict("followup_not_allowed")
+        return response.json()
+
+    async def list_bookings(self, conversation_id: str) -> list[dict[str, Any]]:
+        response = await self._request("GET", "/api/brains/agenda/bookings", params={"conversationId": conversation_id})
+        if not response.is_success:
+            raise CrmError("No se pudieron consultar las citas")
+        return list(response.json().get("bookings") or [])
+
+    async def cancel_booking(self, conversation_id: str, selection_token: str, confirmation: bool) -> dict[str, Any]:
+        body = self._operation(conversation_id, "cancel", selection_token)
+        body.update(selectionToken=selection_token, confirmation=confirmation)
+        response = await self._request("POST", "/api/brains/agenda/cancel", json=body)
+        if response.status_code == 409:
+            raise _booking_conflict(response)
+        if not response.is_success:
+            raise CrmError("No se pudo cancelar la cita")
+        return response.json()
+
+    def _operation(self, conversation_id: str, action: str, value: str) -> dict[str, Any]:
+        envelope = self._envelopes.get(conversation_id, {})
+        key = hashlib.sha256(f"{conversation_id}:{self.despacho_de(conversation_id)}:{action}:{value}".encode()).hexdigest()
+        return {"conversationId": conversation_id, "idempotencyKey": key, **envelope}
+
     def despacho_de(self, conversation_id: str) -> str:
         """El despacho en curso de esa conversación, o cadena vacía."""
         return self._despachos.get(conversation_id, "")
@@ -117,7 +165,7 @@ class BrainsCrmClient(CrmClient):
         despacho — una para las credenciales y otra dentro del turno.
         """
         resp = await self._request(
-            "GET", "/api/bot/context", params={"conversationId": conversation_id}
+            "GET", "/api/bot/context", params={"conversationId": conversation_id, "contextVersion": "2"}
         )
         if resp.status_code != 200:
             logger.warning(
@@ -128,6 +176,7 @@ class BrainsCrmClient(CrmClient):
             return None
         data: dict[str, Any] = resp.json()
         self._perfil = _perfil_desde_contexto(data)
+        self.supports_coordination = bool((data.get("agent") or {}).get("coordinationFollowupEnabled"))
         self._llm = data.get("llm") or None
         self._precargado[conversation_id] = data
         return data
@@ -142,7 +191,13 @@ class BrainsCrmClient(CrmClient):
         return self._llm
 
     def _request(self, method: str, url: str, **kwargs: Any):  # type: ignore[override]
-        return super()._request(method, RUTAS.get(url, url), **kwargs)
+        ruta = RUTAS.get(url, url)
+        if ruta == url:
+            for origen, destino in RUTAS_POR_PREFIJO.items():
+                if url.startswith(origen):
+                    ruta = destino + url.removeprefix(origen)
+                    break
+        return super()._request(method, ruta, **kwargs)
 
     async def send_message(
         self, conversation_id: str, text: str, dispatch_id: str = ""
@@ -208,18 +263,22 @@ class BrainsCrmClient(CrmClient):
         precargado = self._precargado.pop(conversation_id, None)
         if precargado is not None:
             self._perfil = _perfil_desde_contexto(precargado)
+            self.supports_coordination = bool((precargado.get("agent") or {}).get("coordinationFollowupEnabled"))
             return precargado
 
         resp = await self._request(
-            "GET", "/api/bot/context", params={"conversationId": conversation_id}
+            "GET", "/api/bot/context", params={"conversationId": conversation_id, "contextVersion": "2"}
         )
         if resp.status_code == 404:
             return None
+        if es_caida(resp.status_code):
+            raise CrmUnreachable(f"context devolvió {resp.status_code}")
         if resp.status_code != 200:
             raise CrmError(f"context devolvió {resp.status_code}")
         data: dict[str, Any] = resp.json()
         self._perfil = _perfil_desde_contexto(data)
-        self._llm = data.get("llm") or self._llm
+        self.supports_coordination = bool((data.get("agent") or {}).get("coordinationFollowupEnabled"))
+        self._llm = data.get("llm") or None
         return data
 
     async def get_profile(self) -> dict[str, Any] | None:
@@ -232,18 +291,32 @@ class BrainsCrmClient(CrmClient):
         """
         return self._perfil
 
-    async def agenda_available(self) -> bool:
-        """¿Este CRM agenda? 404 = la bandera está apagada allá."""
+    async def sondear_agenda(self, timeout: float | None = None) -> bool | None:
+        """¿Este CRM agenda? Solo el 404 VACÍO es la bandera apagada.
+
+        Esta superficie autentica y exige conversación, así que la sonda
+        pregunta por una inventada (`cv_sonda`). Con la agenda encendida el CRM
+        contesta 404 CON su sobre de error («conversación no encontrada»), o
+        401: el endpoint existe. Cuando aquí se leía cualquier 404 como
+        apagada, una Nea cloud de un solo negocio arrancaba SIEMPRE sin agenda.
+
+        Sin respuesta (red, timeout, 5xx) no se puede concluir: None, y quien
+        pregunta decide — `agenda_available` asume que sí, porque prometer
+        menos de lo que hay es tan malo como prometer de más.
+        """
+        extra: dict[str, Any] = {} if timeout is None else {"timeout": timeout}
         try:
             resp = await self._request(
-                "GET", "/api/bot/availability", params={"conversationId": "cv_sonda"}
+                "GET",
+                "/api/bot/availability",
+                params={"conversationId": "cv_sonda"},
+                **extra,
             )
         except CrmError:
-            # Sin respuesta no se puede concluir que NO haya agenda. Se asume
-            # que sí y el primer intento real lo dirá: prometer menos de lo que
-            # hay es tan malo como prometer de más.
-            return True
-        return resp.status_code != 404
+            return None
+        if resp.status_code >= 500:
+            return None
+        return not _agenda_apagada(resp)
 
     async def get_availability(
         self,
@@ -263,35 +336,74 @@ class BrainsCrmClient(CrmClient):
             "/api/bot/availability",
             params={"conversationId": conversation_id},
         )
-        if resp.status_code == 404:
-            raise AgendaUnavailable("este CRM no tiene el motor de agenda encendido")
+        _404_de_agenda(resp, "availability")
         if resp.status_code != 200:
-            raise CrmError(f"availability devolvió {resp.status_code}")
+            raise CrmError("availability_unknown: no afirmar que el calendario está libre; reintentar o derivar")
         slots = resp.json().get("slots") or []
         return list(slots)[:limit]
 
-    async def create_booking(
-        self, conversation_id: str, start_utc: str
+    async def consultar_huecos(
+        self,
+        conversation_id: str,
+        date: str | None = None,
+        limit: int = 12,
+        per_day: int | None = None,
+        days: int | None = None,
     ) -> dict[str, Any]:
-        return await self._agendar("POST", conversation_id, start_utc, "bookings")
+        """Huecos + `query` (hasta dónde llega lo consultado), sin recortar.
+
+        Sin recorte a propósito: con `date` el CRM registra como oferta TODAS
+        las horas de ese día, y si Nea se quedara con menos, rechazaría por su
+        cuenta una hora que el CRM sí ofreció. `limit`, `per_day` y `days` no
+        viajan, igual que en `get_availability`: el reparto lo decide el CRM.
+        """
+        params: dict[str, Any] = {"conversationId": conversation_id}
+        if date:
+            params["date"] = date
+        resp = await self._request("GET", "/api/bot/availability", params=params)
+        _404_de_agenda(resp, "availability")
+        if resp.status_code != 200:
+            raise CrmError("availability_unknown: no afirmar que el calendario está libre; reintentar o derivar")
+        data = resp.json()
+        return {"slots": list(data.get("slots") or []), "query": data.get("query")}
+
+    async def create_booking(
+        self, conversation_id: str, start_utc: str, reminder_consent: bool = False
+    ) -> dict[str, Any]:
+        return await self._agendar("POST", conversation_id, start_utc, "bookings", reminder_consent=reminder_consent)
 
     async def reschedule_booking(
-        self, conversation_id: str, start_utc: str
+        self, conversation_id: str, start_utc: str, selection_token: str | None = None
     ) -> dict[str, Any]:
-        return await self._agendar("PATCH", conversation_id, start_utc, "reschedule")
+        return await self._agendar("PATCH", conversation_id, start_utc, "reschedule", selection_token)
 
     async def _agendar(
-        self, method: str, conversation_id: str, start_utc: str, que: str
+        self, method: str, conversation_id: str, start_utc: str, que: str, selection_token: str | None = None, reminder_consent: bool = False
     ) -> dict[str, Any]:
+        body: dict[str, Any] = {"conversationId": conversation_id, "startUtc": start_utc}
+        if self.supports_agenda_v2:
+            operation_value = start_utc + (selection_token or "") + (":reminders" if reminder_consent else "")
+            body.update(self._operation(conversation_id, method, operation_value))
+            if method == "POST":
+                body["reminderConsent"] = reminder_consent
+            if method == "PATCH":
+                body.update(selectionToken=selection_token, confirmation=True)
         resp = await self._request(
             method,
             "/api/bot/bookings",
-            json={"conversationId": conversation_id, "startUtc": start_utc},
+            json=body,
         )
         if resp.status_code == 409:
             raise _booking_conflict(resp)
         if resp.status_code == 404:
-            raise AgendaUnavailable("este CRM no tiene el motor de agenda encendido")
+            # Mismo 404 ambiguo que en `/api/bot`: con cuerpo es "no hay cita
+            # que mover" (o, al reservar, "no encuentro esa conversación");
+            # vacío, "aquí no hay agenda". Leerlos igual apagaba el
+            # agendamiento de toda la instancia la primera vez que alguien
+            # quería mover una cita que ya había pasado.
+            if method == "PATCH" and not _agenda_apagada(resp):
+                raise CrmConflict("no_booking", _payload(resp))
+            _404_de_agenda(resp, que)
         if resp.status_code not in (200, 201):
             raise CrmError(f"{que} devolvió {resp.status_code}")
         return _aplanar_reserva(resp.json())
@@ -314,13 +426,16 @@ def _perfil_desde_contexto(data: dict[str, Any]) -> dict[str, Any]:
     """
     agent = data.get("agent") or {}
     knowledge = data.get("knowledge") or []
-    bloques = [
-        f"P: {k.get('question')}\nR: {k.get('answer')}"
-        for k in knowledge
-        if isinstance(k, dict) and k.get("question") and k.get("answer")
-    ]
+    bloques = []
+    for k in knowledge:
+        if not isinstance(k, dict):
+            continue
+        if k.get("kind") == "block" and isinstance(k.get("content"), str):
+            bloques.append(k["content"])
+        elif k.get("kind", "qa") == "qa" and k.get("question") and k.get("answer"):
+            bloques.append(f"P: {k['question']}\nR: {k['answer']}")
     return {
-        "profile": agent,
+        "profile": {**agent, "cloud": True},
         "kb": "\n\n".join(bloques) if bloques else None,
         # Esta superficie todavía no expone los recursos del negocio (enlaces
         # que el agente puede compartir). Lista vacía en vez de omitirla: el

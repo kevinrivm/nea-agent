@@ -13,7 +13,7 @@ from tests.conftest import (
     IDENTITY,
     make_ctx,
     mock_crm_basics,
-    wa_body,
+    despachar,
 )
 
 
@@ -63,7 +63,7 @@ async def test_tercer_strike_fuerza_handoff_aunque_el_llm_no_lo_llame(respx_mock
     ]
     async with httpx.AsyncClient(transport=transport, base_url="http://bot.test") as c:
         for i, texto in enumerate(hostiles):
-            await c.post("/webhook", content=wa_body(text=texto, wamid=f"wamid.host{i}"))
+            await despachar(c, ctx, text=texto, wamid=f"wamid.host{i}")
             await asyncio.sleep(0.3)
     await ctx.crm.aclose()
 
@@ -89,7 +89,7 @@ async def test_dos_strikes_no_disparan_nada(respx_mock):
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://bot.test") as c:
         for i, texto in enumerate(["esto es una estafa", "pinches bots chafas"]):
-            await c.post("/webhook", content=wa_body(text=texto, wamid=f"wamid.h2{i}"))
+            await despachar(c, ctx, text=texto, wamid=f"wamid.h2{i}")
             await asyncio.sleep(0.3)
     await ctx.crm.aclose()
     assert routes["handoff"].call_count == 0

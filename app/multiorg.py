@@ -181,6 +181,9 @@ class RegistroDeOrganizaciones:
                 # llega al proveedor igual que en mono-organizacion.
                 reasoning_effort=por_defecto.llm_reasoning_effort,
                 provider_sort=por_defecto.llm_provider_sort,
+                # Y el tope por intento, tambien de esta Nea: el CRM reenvia,
+                # pero quien espera al proveedor colgado es el turno de aqui.
+                timeout=por_defecto.llm_timeout_seconds,
             )
             self._llms[clave] = cliente
         return cliente
@@ -219,6 +222,16 @@ class CrmSinOrganizacion:
         concluir. Si resulta que no, el primer intento real recibe 404 y las
         herramientas de agenda contestan "aquí no se agenda" — un camino que ya
         existe y está probado.
+        """
+        return True
+
+    async def sondear_agenda(self, timeout: float | None = None) -> bool | None:
+        """Lo mismo, para la sonda con caducidad (app/agenda.py).
+
+        True y no None a propósito: con None la sonda se quedaría con lo
+        último que supo, y tras un 404 de la bandera eso sería «apagada» para
+        siempre. Con True, al vencer el TTL se vuelve a intentar con el primer
+        turno que llegue, que es el que de verdad pregunta con credencial.
         """
         return True
 

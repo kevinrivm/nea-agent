@@ -84,10 +84,11 @@ async def test_el_motivo_viaja_tal_cual_al_crm() -> None:
 
 
 @pytest.mark.asyncio
-async def test_un_handoff_que_falla_no_tumba_el_turno() -> None:
+async def test_un_handoff_que_falla_conserva_el_trabajo_para_recuperacion() -> None:
     class _CrmRoto:
         async def post_handoff(self, conversation_id: str, reason: str) -> None:
             raise RuntimeError("el CRM no contesta")
 
-    # No debe propagar: el mensaje del cliente ya está guardado en la bandeja.
-    await _a_humano(_CrmRoto(), "cv_1", "sin_credencial")
+    # The durable worker must not mark done when the human handoff failed.
+    with pytest.raises(RuntimeError):
+        await _a_humano(_CrmRoto(), "cv_1", "sin_credencial")

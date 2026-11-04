@@ -343,7 +343,6 @@ def arranque_multiorg(monkeypatch):
     for ausente in ("CRM_ORGANIZATION", "LLM_API_KEY", "OPENAI_API_KEY"):
         monkeypatch.setenv(ausente, "")
     monkeypatch.setattr(main, "PgStore", lambda *_a, **_k: _StoreDePrueba())
-    monkeypatch.setattr(main, "RelayWorker", _WorkerQuieto)
     monkeypatch.setattr(main, "FollowupWorker", _WorkerQuieto)
     monkeypatch.setattr(main, "SenderWorker", _WorkerQuieto)
 
@@ -402,6 +401,7 @@ def test_el_mapeo_de_conversacion_no_se_deja_ninguna_columna():
         "followup_sent": False,
         "last_inbound_at": ahora,
         "stalled_at": None,
+        "stall_since_message_id": 7,
     }
     conv = _conv_from_row(fila)
 

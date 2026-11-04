@@ -14,9 +14,10 @@ from datetime import datetime
 from typing import Any
 
 from app.crm import CrmConflict, CrmError
+from app.formato import a_whatsapp
 from app.llm import LlmExhausted
 from app.profile import resolve_profile
-from app.prompt import FOLLOWUP_INSTRUCTION, build_system_prompt
+from app.prompt import FOLLOWUP_INSTRUCTION, build_system_prompt, zona_del_negocio
 from app.state import AppContext, Conversation, utcnow
 from app.multiorg import ctx_de_organizacion
 from app.turn import conversation_lock
@@ -40,6 +41,8 @@ class FollowupWorker:
                 logger.exception("followup: fallo en el barrido")
 
     async def tick(self, now: datetime | None = None) -> None:
+        if self._ctx.settings.cloud_mode:
+            return  # Cloud coordination is opt-in and durable in the CRM, never a second sender.
         now = now or utcnow()
         for conv in await self._ctx.store.due_followups(now):
             # Claim atómico ANTES de enviar: jamás un segundo empujón.
@@ -147,7 +150,8 @@ class FollowupWorker:
             context=context,
             conv=conv,
             offered=[],
-            tz=_agent_tz(ctx.settings),
+            tz=zona_del_negocio(context, _agent_tz(ctx.settings)),
+            recordatorios=bool(getattr(ctx.crm, "supports_agenda_v2", False)),
         )
         history = await ctx.store.recent_messages(
             conv.id, ctx.settings.history_window
@@ -162,7 +166,9 @@ class FollowupWorker:
         except LlmExhausted as exc:
             logger.warning("followup %s: LLM agotado (%s) — omitido", conv.wa_identity, exc)
             return
-        text = (reply.content or "").strip()
+        # Igual que el turno: WhatsApp no pinta Markdown (app/formato.py), y
+        # el historial guarda lo que el lead de verdad recibió.
+        text = a_whatsapp((reply.content or "").strip())
         if not text:
             logger.warning("followup %s: LLM sin texto — omitido", conv.wa_identity)
             return

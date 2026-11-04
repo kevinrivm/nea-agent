@@ -5,6 +5,8 @@ Gotchas del brief que se honran aquí:
 - Respuesta vacía de verdad (sin content ni tool_calls) o excepción → reintento
   con backoff (2 reintentos). Agotado → `LlmExhausted` y el turno degrada en
   silencio + handoff error (Constitución IV).
+- Cada intento tiene tope (`LLM_TIMEOUT_SECONDS`) y el SDK no reintenta por su
+  cuenta: los reintentos son estos, no se multiplican.
 - Los `arguments` de las tools pueden venir malformados: JSON inválido → {}.
 """
 from __future__ import annotations
@@ -73,6 +75,10 @@ def _formato_de_audio(mime: str) -> str:
     return _FORMATOS.get((mime or "").split(";")[0].strip().lower(), "ogg")
 
 
+# Segundos por intento, el default de LLM_TIMEOUT_SECONDS (ver config.py).
+DEFAULT_TIMEOUT = 45.0
+
+
 class OpenAiLlm:
     RETRIES = 2  # además del intento inicial
 
@@ -85,6 +91,7 @@ class OpenAiLlm:
         default_headers: dict[str, str] | None = None,
         reasoning_effort: str = "",
         provider_sort: str = "",
+        timeout: float = DEFAULT_TIMEOUT,
     ) -> None:
         # base_url ≠ None → proveedor OpenAI-compatible (p. ej. OpenRouter,
         # para el bench de modelos del 002). Ojo: la transcripción de audio
@@ -93,8 +100,20 @@ class OpenAiLlm:
         # `default_headers` lo usa el modo multi-organización: cuando quien
         # piensa es el CRM (y no OpenRouter directo), hay que decirle de qué
         # organización es cada llamada.
+        #
+        # `timeout` y `max_retries=0` van juntos. Por defecto el SDK espera
+        # hasta 600 s por petición y reintenta dos veces más POR SU CUENTA,
+        # así que cada intento de abajo eran hasta tres peticiones de diez
+        # minutos. Los reintentos son de Nea (RETRIES + backoff en `complete`,
+        # dos intentos en `transcribe`): un timeout es una excepción más, cae
+        # en ese mismo camino y, agotado, termina en `LlmExhausted` → silencio
+        # + handoff `error`, como cualquier otro fallo del proveedor.
         self._client = AsyncOpenAI(
-            api_key=api_key, base_url=base_url, default_headers=default_headers
+            api_key=api_key,
+            base_url=base_url,
+            default_headers=default_headers,
+            timeout=timeout,
+            max_retries=0,
         )
         self._model = model
         self._transcribe_model = transcribe_model
@@ -322,3 +341,103 @@ class OpenAiLlm:
                 ToolCall(id=getattr(tc, "id", "") or "", name=name, arguments=args)
             )
         return LlmReply(content=content, tool_calls=tool_calls)
+
+
+# 036 — La ruta del proxy del CRM cuando el perfil no la dice.
+RUTA_LLM_DEL_CRM = "/api/bot/llm"
+
+
+class LlmPorElCrm:
+    """El modelo, llamado a través del CRM (spec 036 D6 de vocero-crm).
+
+    Junto a Vocero raíz la llave del modelo vive en Ajustes → IA del CRM, no
+    aquí. `POST {CRM}/api/bot/llm/*` es compatible con OpenAI: le pone esa
+    llave y reenvía el cuerpo tal cual. Nea entra con `CRM_BOT_API_KEY` en
+    `Authorization: Bearer`, que es lo que manda el SDK.
+
+    El modelo lo elige el negocio en el CRM y llega en el perfil (`llm.model`);
+    sin él, `LLM_MODEL`. Por eso este cliente no es un `OpenAiLlm` fijo: en
+    cada llamada mira el perfil —que ya está en caché con su TTL, no es un
+    viaje más al CRM— y usa el `OpenAiLlm` de ESE modelo. Cambiar el modelo en
+    el CRM llega sin reiniciar Nea, como el resto del perfil. Se cachea uno
+    por (modelo, ruta), igual que `RegistroDeOrganizaciones.llm`: cada uno
+    tiene su pool de conexiones y su memoria de `_extras_ok`.
+
+    El modelo que TRANSCRIBE es el de `LLM_TRANSCRIBE_MODEL`, por el mismo
+    proxy: el audio viaja dentro del chat (`_audio_por_chat`).
+
+    Si el CRM no tiene IA (402 `sin_credencial`) o el proveedor no contesta
+    (504), el SDK lo levanta como cualquier otro fallo: reintentos y, agotados,
+    `LlmExhausted` → silencio + handoff `error`. Nada nuevo que cablear.
+    """
+
+    def __init__(
+        self,
+        crm_base_url: str,
+        api_key: str,
+        perfil: Any,
+        *,
+        model: str,
+        transcribe_model: str = "whisper-1",
+        reasoning_effort: str = "",
+        provider_sort: str = "",
+        timeout: float = DEFAULT_TIMEOUT,
+    ) -> None:
+        self._crm = crm_base_url.rstrip("/")
+        self._api_key = api_key
+        self._perfil = perfil  # ProfileProvider (o None en pruebas)
+        self._model = model
+        self._transcribe_model = transcribe_model
+        self._reasoning_effort = reasoning_effort
+        self._provider_sort = provider_sort
+        self._timeout = timeout
+        self._clientes: dict[tuple[str, str], OpenAiLlm] = {}
+
+    async def _eleccion(self) -> tuple[str, str]:
+        """(modelo, base_url) según el perfil vigente.
+
+        Un perfil que no se pudo leer no tumba el turno: se piensa con
+        `LLM_MODEL` por la ruta de siempre, y si el CRM tampoco contesta ahí,
+        es el camino de fallo de siempre.
+        """
+        model: str | None = None
+        path: str | None = None
+        if self._perfil is not None:
+            try:
+                perfil = await self._perfil.get()
+                model = getattr(perfil, "llm_model", None)
+                path = getattr(perfil, "llm_path", None)
+            except Exception as exc:
+                logger.warning("llm por el CRM: sin perfil (%s) — uso LLM_MODEL", exc)
+        return model or self._model, self._crm + (path or RUTA_LLM_DEL_CRM)
+
+    async def cliente(self) -> OpenAiLlm:
+        """El `OpenAiLlm` del modelo que el negocio tiene elegido ahora."""
+        clave = await self._eleccion()
+        cliente = self._clientes.get(clave)
+        if cliente is None:
+            model, base_url = clave
+            cliente = OpenAiLlm(
+                self._api_key,
+                model,
+                transcribe_model=self._transcribe_model,
+                base_url=base_url,
+                reasoning_effort=self._reasoning_effort,
+                provider_sort=self._provider_sort,
+                timeout=self._timeout,
+            )
+            self._clientes[clave] = cliente
+            logger.info("llm por el CRM: pienso con %s", model)
+        return cliente
+
+    async def complete(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+    ) -> LlmReply:
+        return await (await self.cliente()).complete(messages, tools)
+
+    async def transcribe(
+        self, data: bytes, mime: str, filename: str = "audio.ogg"
+    ) -> str:
+        return await (await self.cliente()).transcribe(data, mime, filename)

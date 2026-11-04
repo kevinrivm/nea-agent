@@ -291,6 +291,31 @@ class TestCliente:
         assert ctx is not None
         assert ruta.calls.last.request.url.params["conversationId"] == CONV
 
+    @respx.mock
+    async def test_descarga_adjuntos_por_la_superficie_del_cerebro(
+        self, cliente: BrainsCrmClient
+    ) -> None:
+        """El id dinámico también debe traducirse de ``bot`` a ``brains``.
+
+        Sin esta traducción, las notas de voz llegan al cerebro pero el CRM
+        rechaza la descarga antes de que el modelo pueda transcribirlas.
+        """
+        ruta = respx.get(f"{CRM_URL}/api/brains/media/media-audio-1").mock(
+            return_value=httpx.Response(
+                200,
+                content=b"audio-ogg",
+                headers={"content-type": "audio/ogg; codecs=opus"},
+            )
+        )
+
+        data, mime = await cliente.get_media("media-audio-1")
+
+        assert data == b"audio-ogg"
+        assert mime == "audio/ogg; codecs=opus"
+        pedido = ruta.calls.last.request
+        assert pedido.headers["authorization"] == f"Bearer {SECRETO}"
+        assert pedido.headers["x-vocero-organization"] == "mi-negocio"
+
     async def test_sin_despacho_previo_no_hay_contexto(
         self, cliente: BrainsCrmClient
     ) -> None:
@@ -470,7 +495,27 @@ class TestAudio:
         assert s.audio_mal_configurado is False
 
     def test_con_openai_nunca_avisa(self) -> None:
-        assert Settings().audio_mal_configurado is False
+        # Con llave propia y sin LLM_BASE_URL: OpenAI, donde whisper-1 existe.
+        # Explícita: sin llave, desde la 036 Nea piensa por el CRM (y ahí sí
+        # avisa), y en Windows OPENAI_API_KEY del entorno la rellenaba sola.
+        assert Settings(llm_api_key="sk-propia").audio_mal_configurado is False
+
+    def test_pensando_por_el_crm_con_whisper_avisa(self) -> None:
+        assert Settings(llm_api_key="").audio_mal_configurado is True
+
+    def test_whisper_por_chat_se_cambia_por_uno_que_oye(self) -> None:
+        from app.config import MODELO_QUE_OYE
+
+        por_crm = Settings(llm_api_key="")
+        assert por_crm.modelo_de_transcripcion == MODELO_QUE_OYE
+        compatible = Settings(llm_base_url="https://openrouter.ai/api/v1")
+        assert compatible.modelo_de_transcripcion == MODELO_QUE_OYE
+
+    def test_el_modelo_elegido_se_respeta(self) -> None:
+        elegido = Settings(llm_api_key="", llm_transcribe_model="google/gemini-2.5-flash")
+        assert elegido.modelo_de_transcripcion == "google/gemini-2.5-flash"
+        # Con OpenAI, whisper-1 existe y se queda.
+        assert Settings(llm_api_key="sk-propia").modelo_de_transcripcion == "whisper-1"
 
     @respx.mock
     async def test_transcribe_pidiendo_SOLO_el_texto(self) -> None:

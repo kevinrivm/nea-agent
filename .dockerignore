@@ -1,0 +1,12 @@
+*
+!Dockerfile
+!requirements.txt
+!app/
+!app/**
+!migrations/
+!migrations/**
+!scripts/
+!scripts/live-security-test.py
+**/__pycache__
+**/*.pyc
+**/.env*

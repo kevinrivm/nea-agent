@@ -10,23 +10,20 @@ from pathlib import Path
 from typing import Any
 
 import asyncpg
+from app.dispatch_store import PgDispatchStore
 
-from app.state import BotMessage, Conversation, OfferedSlot, PendingSend, RelayItem
+from app.state import (
+    COLUMNAS_DE_CONVERSACION,
+    BotMessage,
+    Conversation,
+    OfferedSlot,
+    PendingSend,
+)
 
 logger = logging.getLogger("nea.db")
 
-_CONV_COLUMNS = frozenset(
-    {
-        "crm_conversation_id",
-        "phase",
-        "greeted",
-        "media_notice_sent",
-        "followup_due_at",
-        "followup_sent",
-        "last_inbound_at",
-        "stalled_at",
-    }
-)
+# La misma lista que usa MemoryStore (ver app/state.py).
+_CONV_COLUMNS = COLUMNAS_DE_CONVERSACION
 
 
 def _conv_from_row(row: asyncpg.Record) -> Conversation:
@@ -41,6 +38,7 @@ def _conv_from_row(row: asyncpg.Record) -> Conversation:
         followup_sent=row["followup_sent"],
         last_inbound_at=row["last_inbound_at"],
         stalled_at=row["stalled_at"],
+        stall_since_message_id=row["stall_since_message_id"],
         organization_id=row["organization_id"],
         organization_slug=row["organization_slug"],
     )
@@ -75,11 +73,15 @@ def _pending_send_desde_fila(row: Any) -> PendingSend:
     )
 
 
-class PgStore:
+class PgStore(PgDispatchStore):
     """Store respaldado por Postgres (asyncpg)."""
 
-    def __init__(self, dsn: str) -> None:
+    def __init__(self, dsn: str, schema: str = "") -> None:
         self._dsn = dsn
+        # 031 — Vacío = `public`, como siempre. Con nombre, las tablas de Nea
+        # viven en ese esquema y la base se puede compartir con el CRM. El
+        # nombre ya llega validado por `Settings` (minúsculas, dígitos y `_`).
+        self._schema = schema
         self._pool: asyncpg.Pool | None = None
 
     @property
@@ -89,7 +91,25 @@ class PgStore:
         return self._pool
 
     async def connect(self) -> None:
-        self._pool = await asyncpg.create_pool(self._dsn, min_size=1, max_size=5)
+        if not self._schema:
+            self._pool = await asyncpg.create_pool(self._dsn, min_size=1, max_size=5)
+            return
+        # El esquema tiene que existir ANTES de abrir el pool: con un
+        # `search_path` que apunta a un esquema que no existe, Postgres acepta
+        # la conexión y el primer CREATE TABLE falla con «no schema has been
+        # selected».
+        conn = await asyncpg.connect(self._dsn)
+        try:
+            await conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{self._schema}"')
+        finally:
+            await conn.close()
+        self._pool = await asyncpg.create_pool(
+            self._dsn,
+            min_size=1,
+            max_size=5,
+            server_settings={"search_path": self._schema},
+        )
+        logger.info("tablas de Nea en el esquema %s", self._schema)
 
     async def migrate(self, migrations_dir: Path) -> None:
         """Aplica todas las migraciones en orden. Son idempotentes: re-correr es seguro."""
@@ -112,62 +132,15 @@ class PgStore:
         )
         return row is not None
 
-    # -------------------------------------------------------------- relay ---
-
-    async def enqueue_relay(self, body: bytes, signature: str | None) -> int:
-        row = await self.pool.fetchrow(
-            "INSERT INTO relay_queue (body, signature) VALUES ($1, $2) RETURNING id",
-            body,
-            signature,
-        )
-        assert row is not None
-        return row["id"]
-
-    async def due_relays(self, now: datetime) -> list[RelayItem]:
+    async def already_processed(self, marcas: list[str]) -> set[str]:
+        if not marcas:
+            return set()
         rows = await self.pool.fetch(
-            """
-            SELECT * FROM relay_queue
-            WHERE delivered_at IS NULL AND abandoned_at IS NULL AND next_retry_at <= $1
-            ORDER BY id
-            LIMIT 50
-            """,
-            now,
+            "SELECT wa_message_id FROM processed_message"
+            " WHERE wa_message_id = ANY($1::text[])",
+            marcas,
         )
-        return [
-            RelayItem(
-                id=r["id"],
-                body=bytes(r["body"]),
-                signature=r["signature"],
-                attempts=r["attempts"],
-                created_at=r["created_at"],
-                next_retry_at=r["next_retry_at"],
-                delivered_at=r["delivered_at"],
-                abandoned_at=r["abandoned_at"],
-                organization_id=r["organization_id"],
-                organization_slug=r["organization_slug"],
-            )
-            for r in rows
-        ]
-
-    async def mark_relay_delivered(self, relay_id: int) -> None:
-        await self.pool.execute(
-            "UPDATE relay_queue SET delivered_at = now() WHERE id = $1", relay_id
-        )
-
-    async def mark_relay_abandoned(self, relay_id: int) -> None:
-        await self.pool.execute(
-            "UPDATE relay_queue SET abandoned_at = now() WHERE id = $1", relay_id
-        )
-
-    async def reschedule_relay(
-        self, relay_id: int, attempts: int, next_retry_at: datetime
-    ) -> None:
-        await self.pool.execute(
-            "UPDATE relay_queue SET attempts = $2, next_retry_at = $3 WHERE id = $1",
-            relay_id,
-            attempts,
-            next_retry_at,
-        )
+        return {r["wa_message_id"] for r in rows}
 
     # ----------------------------------------------------- conversaciones ---
 
@@ -235,6 +208,25 @@ class PgStore:
                     """,
                     conversation_id,
                 )
+
+    async def forget_conversation(
+        self, organization_id: str, wa_identity: str, crm_conversation_id: str
+    ) -> bool:
+        # Una sola sentencia: `bot_message`, `offered_slots` y `pending_send`
+        # cuelgan de la fila con ON DELETE CASCADE (001 y 002), así que no hay
+        # orden que equivocar ni estado a medias si el proceso muere.
+        row = await self.pool.fetchrow(
+            """
+            DELETE FROM bot_conversation
+            WHERE organization_id = $1 AND wa_identity = $2
+              AND (crm_conversation_id IS NULL OR crm_conversation_id = $3)
+            RETURNING id
+            """,
+            organization_id,
+            wa_identity,
+            crm_conversation_id,
+        )
+        return row is not None
 
     # ----------------------------------------------------------- mensajes ---
 

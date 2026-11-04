@@ -1,0 +1,34 @@
+name: Security and PostgreSQL
+on:
+  pull_request:
+    paths-ignore: ['**/*.md']
+permissions:
+  contents: read
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ['5432:5432']
+        options: --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgresql://postgres@127.0.0.1:5432/postgres
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements-dev.txt pip-audit
+      - run: pip-audit -r requirements.txt
+      - run: python -m compileall -q app
+      - run: pytest -q
+      - run: python scripts/live-security-test.py
+      - run: docker build -t nea-security .
+      - run: test "$(docker run --rm nea-security id -u)" = 10001

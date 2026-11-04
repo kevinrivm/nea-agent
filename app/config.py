@@ -6,6 +6,8 @@ la validación de lo obligatorio ocurre al arranque real.
 """
 from __future__ import annotations
 
+import re
+
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -23,6 +25,36 @@ def canonical_identity(wa_id: str) -> str:
     return s
 
 
+# Un BSUID tal como lo manda Meta: país, punto y el identificador
+# (`US.13491208655302741918`). El CRM lo guarda como `bsuid:<id>`.
+_BSUID_PELON = re.compile(r"^[A-Za-z]{2}\.[A-Za-z0-9]+$")
+_TELEFONO_ESCRITO = re.compile(r"^\+?[\d\s().-]{7,}$")
+
+# El que oye las notas de voz cuando el audio viaja dentro del chat (por el CRM
+# o por un proveedor compatible) y nadie eligió otro. `whisper-1` solo existe
+# en OpenAI: por esa vía hacía fallar TODA nota de voz. Medido el 22-oct-2026
+# por OpenRouter con una nota en español: transcripción literal en 1.9 s, una
+# diezmilésima de dólar.
+MODELO_QUE_OYE = "google/gemini-3.5-flash-lite"
+
+
+def _identidad_de_lista(parte: str) -> str:
+    """Una entrada de ALLOWED_WA_IDS / TESTER_WA_IDS, en la forma del CRM.
+
+    Las identidades llegan como las manda el CRM en el despacho: el BSUID
+    con su prefijo `bsuid:`. En la lista vale escribirlo como lo enseña el
+    CRM o pelón, como sale en el payload de Meta.
+    """
+    # Un teléfono se escribe como uno quiera: «+52 1 462 …», «52-462-…». La
+    # identidad del CRM es solo dígitos (521… → 52…), y con el «+» la lista
+    # no coincidía nunca: Nea no le contestaba ni al dueño en modo prueba
+    # (ensayo del starter 3.0.0, 2026-10-21).
+    if _TELEFONO_ESCRITO.match(parte.strip()):
+        parte = re.sub(r"\D", "", parte)
+    s = canonical_identity(parte)
+    return f"bsuid:{s}" if _BSUID_PELON.match(s) else s
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -33,18 +65,19 @@ class Settings(BaseSettings):
         populate_by_name=True,
     )
 
-    # Webhook de Meta
-    verify_token: str = ""
-    meta_app_secret: str = ""  # vacío = no se verifica la firma (dev)
-
     # CRM (vocero-crm, bot gateway /api/bot/*)
+    #
+    # Desde la 2.0 Nea no recibe el webhook de Meta: lo recibe el CRM, que le
+    # DESPACHA la ráfaga firmada (app/dispatch.py). Contra Vocero raíz la
+    # firma es esta misma llave, la que autentica lo que Nea le manda al CRM.
     crm_base_url: str = "http://localhost:3000"
-    crm_webhook_url: str = ""  # incluye el segmento del verify token del CRM
     crm_bot_api_key: str = ""
 
     # Perfil del negocio (capa de persona; ver app/profile.py)
     agent_name: str = "Nea"  # se usa si el CRM no define nombre
-    agent_timezone: str = "America/Mexico_City"  # IANA; fechas del prompt
+    # IANA. Respaldo: la zona de cada negocio la manda el CRM con sus citas
+    # (`zona_del_negocio`); esta solo cuenta si el CRM no la dice.
+    agent_timezone: str = "America/Mexico_City"
     brief_path: str = ""  # markdown local, fallback si el CRM no tiene perfil
 
     # LLM
@@ -113,6 +146,21 @@ class Settings(BaseSettings):
         default="throughput", validation_alias=AliasChoices("LLM_PROVIDER_SORT")
     )
 
+    # Cuánto se espera al proveedor del modelo en CADA intento, en segundos.
+    # Vale para conversar y para transcribir notas de voz (es el mismo cliente).
+    #
+    # Sin esto el SDK esperaba hasta 600 s por intento y además reintentaba
+    # dos veces por su cuenta, encima de los reintentos de Nea (llm.py): un
+    # proveedor colgado dejaba al lead mirando "escribiendo…" media hora larga
+    # antes de llegar al handoff `error`. Ahora el SDK no reintenta —ya lo
+    # hace Nea, con su backoff— y un intento que se pasa de este tope cuenta
+    # como fallido: tras los reintentos, silencio + handoff `error`.
+    llm_timeout_seconds: float = Field(
+        default=45.0,
+        gt=0,
+        validation_alias=AliasChoices("LLM_TIMEOUT_SECONDS"),
+    )
+
     # NO hay tope de tokens de salida, y es una decisión, no un olvido.
     #
     # En huaraches se puso uno el 8-sep con un banco que prometía partir a la
@@ -123,6 +171,13 @@ class Settings(BaseSettings):
 
     history_window: int = 10
 
+    # Cada cuántos segundos, como mucho, se le vuelve a preguntar al CRM si
+    # agenda (la bandera AGENDA de Vocero). Antes se preguntaba solo al
+    # arrancar: encenderla exigía reiniciar Nea. La pregunta la hace el primer
+    # turno que llega con la respuesta vencida, con timeout corto; si el CRM no
+    # contesta, se queda la última respuesta. 0 = en cada turno.
+    agenda_probe_ttl_seconds: float = Field(default=60.0, ge=0)
+
     # Guardarraíles y tiempos
     allowed_wa_ids: str = ""
     # Identidades que pueden usar el comando /reset. Va SEPARADA de
@@ -131,20 +186,27 @@ class Settings(BaseSettings):
     # comando quedaba muerto justo donde hace falta — para correr una ronda
     # de pruebas en vivo había que cerrarle la puerta a los leads reales.
     tester_wa_ids: str = ""  # CSV; vacía = responde a todos (Constitución V)
-    coalesce_seconds: float = 4.0
     followup_hours: float = 4.0
-    # "Escribiendo…" casi inmediato al recibir un mensaje (antes del coalesce).
-    typing_delay_seconds: float = 0.5
+    # Candado de cierre (app/stall.py): cuándo Nea se despide de una
+    # conversación que no va a ningún lado y cuánto calla después. Los
+    # valores por defecto son los de siempre; 0 apaga ese disparador.
+    stall_max_turns: int = Field(default=14, ge=0)
+    stall_filler_streak: int = Field(default=3, ge=0)
+    # Tras el cierre, el relleno ("gracias", "ok", un emoji) se contesta con
+    # silencio durante este tiempo; un mensaje con contenido reabre siempre.
+    stall_cooldown_hours: float = Field(default=24.0, ge=0)
 
     # ── Modo cloud (Vocero multitenant) ───────────────────────────────
     #
-    # Vacío = comportamiento de SIEMPRE: Meta manda el webhook a Nea, Nea lo
-    # relaya al CRM y habla con `/api/bot/*`. Ninguna instalación existente
-    # cambia por añadir esto, y ninguna variable nueva es obligatoria.
+    # En los dos modos el CRM recibe el mensaje y se lo DESPACHA a Nea
+    # firmado. Lo que cambia es contra qué CRM y por dónde se contesta:
     #
-    # `cloud` = Nea vive detrás de un Vocero multitenant: el CRM ya recibió el
-    # mensaje y se lo DESPACHA a Nea firmado, y Nea contesta por
-    # `/api/brains/*`. Su personalidad y su conocimiento vienen de SU CRM.
+    # Vacío = Vocero raíz: firma con `CRM_BOT_API_KEY`, contesta por
+    # `/api/bot/*`.
+    #
+    # `cloud` = Nea vive detrás de un Vocero multitenant: firma con
+    # `CRM_BRAIN_SECRET`, contesta por `/api/brains/*`. Su personalidad y su
+    # conocimiento vienen de SU CRM.
     #
     # Con `crm_organization` puesta atiende a ESE negocio y a nadie más: un
     # despacho de otra organización viene firmado con otro secreto y se
@@ -172,11 +234,28 @@ class Settings(BaseSettings):
 
     # Infra
     database_url: str = ""
+    # Esquema de Postgres donde viven las tablas de Nea. Vacío = `public`, como
+    # siempre. Con un nombre (`nea`), Nea lo crea si no existe y guarda ahí
+    # todo lo suyo: así puede compartir la base del CRM sin pisarse con él, y
+    # instalar el par no pide una segunda base.
+    database_schema: str = Field(default="", pattern=r"^[a-z_][a-z0-9_]{0,62}$|^$")
     port: int = 8000
 
     # Desarrollo: loguear el JSON crudo de mensajes no-texto entrantes para
     # capturar los formatos reales de Meta (spec 002). Apagar al terminar.
     capture_payloads: bool = False
+
+    @property
+    def modelo_de_transcripcion(self) -> str:
+        """El modelo que transcribe de verdad.
+
+        Es `LLM_TRANSCRIBE_MODEL`, salvo que siga en `whisper-1` y el audio
+        viaje por el chat: ahí `whisper-1` no existe, así que se usa
+        `MODELO_QUE_OYE`. Quien quiera otro lo pone en la variable.
+        """
+        if self.audio_mal_configurado:
+            return MODELO_QUE_OYE
+        return self.llm_transcribe_model
 
     @property
     def audio_mal_configurado(self) -> bool:
@@ -186,7 +265,25 @@ class Settings(BaseSettings):
         que TODA nota de voz falle. Se detecta al arrancar y se avisa una vez,
         en vez de dejar que se descubra con un cliente esperando respuesta.
         """
-        return bool(self.llm_base_url) and self.llm_transcribe_model == "whisper-1"
+        # Pensando por el CRM también hay proveedor propio: el proxy reenvía el
+        # chat, y el audio viaja dentro del chat (app/llm.py).
+        por_chat = bool(self.llm_base_url) or self.piensa_por_el_crm
+        return por_chat and self.llm_transcribe_model == "whisper-1"
+
+    @property
+    def piensa_por_el_crm(self) -> bool:
+        """¿El modelo se llama a través del CRM y no con una llave propia?
+
+        Spec 036 (D6) de vocero-crm: junto a Vocero raíz, la llave del modelo
+        vive en Ajustes → IA del CRM y `/api/bot/llm` la pone al reenviar. Nea
+        entra con `CRM_BOT_API_KEY`, la misma que ya escribe en la bandeja.
+
+        Solo contra la raíz y solo con `LLM_API_KEY` vacía. Con llave, Nea
+        sigue con su proveedor (cerebro propio), como siempre. En cloud no
+        aplica: allá un negocio usa su llave y varios piensan por
+        `/api/brains/llm` (app/multiorg.py), que es otro contrato.
+        """
+        return not self.cloud_mode and not self.llm_api_key.strip()
 
     @property
     def multi_org(self) -> bool:
@@ -209,10 +306,20 @@ class Settings(BaseSettings):
         """
         return self.vocero_mode.strip().lower() == "cloud"
 
+    @property
+    def dispatch_secret(self) -> str:
+        """Con qué llave se verifica la firma de un despacho.
+
+        La misma que autentica lo que Nea le manda a ese CRM: el secreto del
+        cerebro en cloud, la llave de `/api/bot/*` contra la raíz. Así no hay
+        un secreto más que copiar entre los dos.
+        """
+        return self.crm_brain_secret if self.cloud_mode else self.crm_bot_api_key
+
     @staticmethod
     def _identities(csv: str) -> frozenset[str]:
         return frozenset(
-            canonical_identity(part) for part in csv.split(",") if part.strip()
+            _identidad_de_lista(part) for part in csv.split(",") if part.strip()
         )
 
     @property

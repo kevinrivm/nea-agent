@@ -13,7 +13,7 @@ from tests.conftest import (
     make_ctx,
     make_settings,
     mock_crm_basics,
-    wa_body,
+    despachar,
 )
 
 
@@ -32,14 +32,11 @@ async def allow_client(allow_ctx):
     await allow_ctx.crm.aclose()
 
 
-async def test_allowlist_fuera_relay_si_respuesta_no(allow_ctx, allow_client, respx_mock):
+async def test_allowlist_fuera_sin_respuesta(allow_ctx, allow_client, respx_mock):
     routes = mock_crm_basics(respx_mock)
     # identidad que NO está en la allowlist
-    await allow_client.post(
-        "/webhook", content=wa_body(frm="529999999999", wamid="wamid.out")
-    )
+    await despachar(allow_client, allow_ctx, frm="529999999999", wamid="wamid.out")
     await asyncio.sleep(0.2)
-    assert len(allow_ctx.store.relays) == 1  # relay sí
     assert routes["context"].call_count == 0  # ni siquiera consulta contexto
     assert routes["messages"].call_count == 0  # respuesta no
     assert len(allow_ctx.llm.calls) == 0
@@ -50,16 +47,14 @@ async def test_allowlist_dentro_con_canonicalizacion_521(
 ):
     routes = mock_crm_basics(respx_mock)
     # Meta reporta 5255... (12 dígitos); la allowlist trae 52155... (13) — misma persona
-    await allow_client.post(
-        "/webhook", content=wa_body(frm="525550001111", wamid="wamid.in")
-    )
+    await despachar(allow_client, allow_ctx, frm="525550001111", wamid="wamid.in")
     await asyncio.sleep(0.2)
     assert routes["messages"].call_count == 1
 
 
 async def test_ai_pausada_silencio(ctx, client, respx_mock):
     routes = mock_crm_basics(respx_mock, ai_enabled=False)
-    await client.post("/webhook", content=wa_body())
+    await despachar(client, ctx)
     await asyncio.sleep(0.2)
     assert routes["context"].call_count == 1  # sí consultó el contexto
     assert len(ctx.llm.calls) == 0  # pero no conversó
@@ -68,7 +63,7 @@ async def test_ai_pausada_silencio(ctx, client, respx_mock):
 
 async def test_ventana_cerrada_silencio(ctx, client, respx_mock):
     routes = mock_crm_basics(respx_mock, window_open=False)
-    await client.post("/webhook", content=wa_body())
+    await despachar(client, ctx)
     await asyncio.sleep(0.2)
     assert len(ctx.llm.calls) == 0
     assert routes["messages"].call_count == 0

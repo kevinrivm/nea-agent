@@ -2,7 +2,7 @@
 
 Endpoints:
   GET  /api/bot/profile                               → agent profile + KB (404 = sin perfil)
-  GET  /api/bot/context?waIdentity=...
+  GET  /api/bot/context?conversationId=... (o ?waIdentity=...)
   POST /api/bot/messages   {conversationId, text}   → 409 ai_paused|window_closed
   PUT  /api/bot/ficha      {conversationId, ficha}
   POST /api/bot/handoff    {conversationId, reason}
@@ -29,6 +29,20 @@ class CrmError(Exception):
     """Fallo genérico hablando con el CRM (red, 5xx, 401...)."""
 
 
+class CrmUnreachable(CrmError):
+    """El CRM no contestó: red caída, timeout, 5xx o 429.
+
+    Es pasajero por definición y se distingue del 404 de verdad («no conozco
+    esa identidad»): un turno que no alcanzó al CRM se reintenta
+    (app/turn.py), uno al que el CRM le dijo que no, no.
+    """
+
+
+def es_caida(status_code: int) -> bool:
+    """¿Este código dice «ahora no puedo» y no «no»?"""
+    return status_code >= 500 or status_code == 429
+
+
 class CrmConflict(CrmError):
     """409 tipado del CRM: ai_paused | window_closed | slot_taken."""
 
@@ -39,7 +53,8 @@ class CrmConflict(CrmError):
 
 
 class AgendaUnavailable(CrmError):
-    """El CRM no tiene agenda (404 en `/api/bot/availability|bookings`).
+    """El CRM no tiene agenda (404 VACÍO en `/api/bot/availability|bookings`;
+    ver `_agenda_apagada`).
 
     Vocero trae el motor de agendamiento detrás de una bandera de despliegue
     (`AGENDA`) y viene APAGADA por defecto: en una instancia así esos endpoints
@@ -110,6 +125,40 @@ def _booking_conflict(response: httpx.Response) -> CrmConflict:
     return CrmConflict(code, payload)
 
 
+def _agenda_apagada(response: httpx.Response) -> bool:
+    """¿Este 404 es el de la bandera `AGENDA` apagada?
+
+    Vocero contesta 404 de dos maneras en su superficie de agenda, y no
+    significan lo mismo:
+
+    - con la bandera apagada, VACÍO (`new Response(null, {status: 404})`): el
+      endpoint no existe en esa instancia;
+    - con la agenda encendida, con el sobre de error del CRM
+      (`{"error": {"code": "not_found"}}`, o `{"ok": false, "code": ...}` en
+      `/api/brains`): no existe la conversación o la cita, el endpoint sí.
+
+    Leer el segundo como el primero apagaba la agenda de todo el proceso por
+    una conversación que no se encontró, y la sonda de cloud —que pregunta por
+    una conversación inventada— concluía «apagada» justo con la agenda
+    encendida. Un cuerpo que no es el JSON del CRM (la página HTML de un CRM
+    viejo que no tiene la ruta) cuenta como apagada.
+    """
+    return response.status_code == 404 and not _payload(response)
+
+
+def _404_de_agenda(response: httpx.Response, que: str) -> None:
+    """Traduce el 404 de una ruta de agenda; no hace nada con otro código.
+
+    Solo el de la bandera es `AgendaUnavailable` (el agente deja de ofrecer
+    citas). El del sobre de error es un fallo normal de ESA petición.
+    """
+    if response.status_code != 404:
+        return
+    if _agenda_apagada(response):
+        raise AgendaUnavailable("este CRM no tiene el motor de agenda encendido")
+    raise CrmError(f"{que} devolvió 404 ({_conflict_code(response)})")
+
+
 # Catálogo cerrado del CRM para handoff.reason (006). El LLM escribe motivos
 # libres ("pidió humano", "duda técnica") — aquí se normalizan SIEMPRE:
 # certificación 002 cazó en vivo que un reason fuera de catálogo era 422 y el
@@ -131,6 +180,7 @@ def canonical_handoff_reason(reason: str | None) -> str:
 
 
 class CrmClient:
+    media_path = "/api/bot/media/"
     def __init__(
         self,
         base_url: str,
@@ -143,20 +193,38 @@ class CrmClient:
             headers={"X-API-Key": api_key},
             timeout=timeout,
         )
+        # 031 — De qué conversación es cada identidad, según el despacho. Con
+        # ella el contexto se pide por conversación y no por persona: es la
+        # que el CRM despachó, aunque esa persona tenga otra.
+        self._conversaciones: dict[str, str] = {}
+
+    def registrar(self, identity: str, conversation_id: str) -> None:
+        """Asocia una identidad con su conversación, desde el despacho."""
+        self._conversaciones[identity] = conversation_id
 
     async def _request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
         try:
             return await self._http.request(method, url, **kwargs)
         except httpx.HTTPError as exc:
-            raise CrmError(f"error de red hacia el CRM: {exc}") from exc
+            raise CrmUnreachable(f"error de red hacia el CRM: {exc}") from exc
 
     async def get_context(self, wa_identity: str) -> dict[str, Any] | None:
-        """Contexto conversacional; None si el CRM aún no conoce la identidad (404)."""
-        resp = await self._request(
-            "GET", "/api/bot/context", params={"waIdentity": wa_identity}
+        """Contexto conversacional; None si el CRM no la conoce (404).
+
+        Por la conversación que trajo el despacho si la hay; si no (el
+        seguimiento despierta horas después, sin despacho), por identidad.
+        """
+        conversation_id = self._conversaciones.get(wa_identity)
+        params = (
+            {"conversationId": conversation_id}
+            if conversation_id
+            else {"waIdentity": wa_identity}
         )
+        resp = await self._request("GET", "/api/bot/context", params=params)
         if resp.status_code == 404:
             return None
+        if es_caida(resp.status_code):
+            raise CrmUnreachable(f"context devolvió {resp.status_code}")
         if resp.status_code != 200:
             raise CrmError(f"context devolvió {resp.status_code}")
         data: dict[str, Any] = resp.json()
@@ -196,6 +264,26 @@ class CrmClient:
         )
         if resp.status_code != 200:
             raise CrmError(f"ficha devolvió {resp.status_code}")
+        data: dict[str, Any] = resp.json()
+        return data
+
+    async def move_stage(self, conversation_id: str, stage: str) -> dict[str, Any]:
+        """038 — Mueve al lead a una etapa siguiente (`POST /api/bot/stage`).
+
+        El 409 (`etapa_no_permitida`, `herramienta_apagada`, `ai_paused`) y el
+        422 (`etapa_desconocida`) suben como `CrmConflict` con el sobre de
+        error: su mensaje trae las etapas válidas, y es lo que el modelo
+        necesita para corregirse en el mismo turno.
+        """
+        resp = await self._request(
+            "POST",
+            "/api/bot/stage",
+            json={"conversationId": conversation_id, "stage": stage},
+        )
+        if resp.status_code in (409, 422):
+            raise CrmConflict(_conflict_code(resp), _payload(resp))
+        if resp.status_code != 200:
+            raise CrmError(f"stage devolvió {resp.status_code}")
         data: dict[str, Any] = resp.json()
         return data
 
@@ -239,31 +327,73 @@ class CrmClient:
         if days:
             params["days"] = days
         resp = await self._request("GET", "/api/bot/availability", params=params)
-        if resp.status_code == 404:
-            raise AgendaUnavailable("este CRM no tiene el motor de agenda encendido")
+        _404_de_agenda(resp, "availability")
         if resp.status_code != 200:
             raise CrmError(f"availability devolvió {resp.status_code}")
         slots = resp.json().get("slots") or []
         return list(slots)
 
-    async def agenda_available(self) -> bool:
-        """¿Este CRM ofrece agenda?
+    async def consultar_huecos(
+        self,
+        conversation_id: str,
+        date: str | None = None,
+        limit: int = 12,
+        per_day: int | None = None,
+        days: int | None = None,
+    ) -> dict[str, Any]:
+        """Huecos + `query`: hasta dónde llega lo consultado.
+
+        `query` es None contra un CRM que todavía no la manda; quien consume
+        tiene que tratar entonces la lista como parcial. `date` lo ignora un
+        CRM que no la conoce, y por eso tampoco se da por consultado ese día
+        si no vuelve `query.date`.
+        """
+        params: dict[str, Any] = {"conversationId": conversation_id, "limit": limit}
+        if per_day:
+            params["perDay"] = per_day
+        if days:
+            params["days"] = days
+        if date:
+            params["date"] = date
+        resp = await self._request("GET", "/api/bot/availability", params=params)
+        _404_de_agenda(resp, "availability")
+        if resp.status_code != 200:
+            raise CrmError(f"availability devolvió {resp.status_code}")
+        data = resp.json()
+        return {"slots": list(data.get("slots") or []), "query": data.get("query")}
+
+    async def sondear_agenda(self, timeout: float | None = None) -> bool | None:
+        """¿Este CRM ofrece agenda? True/False, o None si no se pudo saber.
 
         Se pregunta SIN `conversationId` a propósito: con la agenda encendida
-        el CRM responde 422 ("falta conversationId") y con ella apagada, 404.
-        Basta para distinguir, no ensucia la oferta de ninguna conversación y
-        no necesita un endpoint nuevo del CRM.
+        el CRM responde 422 ("falta conversationId") y con ella apagada, 404
+        vacío. Basta para distinguir, no ensucia la oferta de ninguna
+        conversación y no necesita un endpoint nuevo del CRM.
 
-        Ante cualquier otra cosa (red caída, 5xx) se asume que SÍ hay agenda:
-        equivocarse hacia "sí" solo cuesta un intento fallido más adelante,
-        que ya degrada solo; equivocarse hacia "no" apagaría el agendamiento
-        de una instancia que sí lo tiene.
+        None = no se puede concluir (red caída, timeout, 5xx). Qué hacer con
+        eso lo decide quien pregunta: al arrancar se asume que sí
+        (`agenda_available`); al re-sondear se queda con lo último que supo
+        (app/agenda.py). `timeout` corto para no dejar a un turno esperando.
         """
+        extra: dict[str, Any] = {} if timeout is None else {"timeout": timeout}
         try:
-            resp = await self._request("GET", "/api/bot/availability")
+            resp = await self._request("GET", "/api/bot/availability", **extra)
         except CrmError:
-            return True
-        return resp.status_code != 404
+            return None
+        if resp.status_code >= 500:
+            return None
+        return not _agenda_apagada(resp)
+
+    async def agenda_available(self) -> bool:
+        """¿Este CRM ofrece agenda? La sonda, con la duda resuelta hacia el sí.
+
+        Ante cualquier otra cosa que no sea el 404 de la bandera (red caída,
+        5xx) se asume que SÍ hay agenda: equivocarse hacia "sí" solo cuesta un
+        intento fallido más adelante, que ya degrada solo; equivocarse hacia
+        "no" apagaría el agendamiento de una instancia que sí lo tiene.
+        """
+        resultado = await self.sondear_agenda()
+        return True if resultado is None else resultado
 
     async def create_booking(
         self, conversation_id: str, start_utc: str
@@ -275,8 +405,7 @@ class CrmClient:
         )
         if resp.status_code == 409:
             raise _booking_conflict(resp)
-        if resp.status_code == 404:
-            raise AgendaUnavailable("este CRM no tiene el motor de agenda encendido")
+        _404_de_agenda(resp, "bookings")
         # El CRM real responde 201 Created (REST); los mocks viejos daban 200.
         if resp.status_code not in (200, 201):
             raise CrmError(f"bookings devolvió {resp.status_code}")
@@ -302,7 +431,7 @@ class CrmClient:
             # Ojo con este 404: puede ser "no hay cita que mover" (agenda
             # encendida) o "aquí no hay agenda". Los distingue el cuerpo: el
             # primero trae el sobre de error del CRM; el segundo viene vacío.
-            if _payload(resp):
+            if not _agenda_apagada(resp):
                 raise CrmConflict("no_booking", _payload(resp))
             raise AgendaUnavailable("este CRM no tiene el motor de agenda encendido")
         if resp.status_code != 200:
@@ -335,13 +464,19 @@ class CrmClient:
 
         Devuelve (bytes, mime). Timeout amplio: los adjuntos pueden pesar.
         """
-        resp = await self._request(
-            "GET", f"/api/bot/media/{media_id}", timeout=60.0
-        )
-        if resp.status_code != 200:
-            raise CrmError(f"media devolvió {resp.status_code}")
-        mime = resp.headers.get("content-type") or "application/octet-stream"
-        return resp.content, mime
+        limit = 16 * 1024 * 1024
+        try:
+            async with self._http.stream("GET", f"{self.media_path}{media_id}", timeout=30.0) as resp:
+                if resp.status_code != 200:
+                    raise CrmError(f"media devolvió {resp.status_code}")
+                data = bytearray()
+                async for chunk in resp.aiter_bytes():
+                    if len(data) + len(chunk) > limit:
+                        raise CrmError("media exceeds 16 MB")
+                    data.extend(chunk)
+                return bytes(data), resp.headers.get("content-type") or "application/octet-stream"
+        except httpx.HTTPError as exc:
+            raise CrmUnreachable("error de red descargando media") from exc
 
     async def aclose(self) -> None:
         await self._http.aclose()

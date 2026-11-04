@@ -11,6 +11,8 @@ import itertools
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Protocol
+from contextlib import AbstractAsyncContextManager
+from app.dispatch_store import DispatchJob, MemoryDispatchStore
 
 if TYPE_CHECKING:
     from app.config import Settings
@@ -18,6 +20,26 @@ if TYPE_CHECKING:
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+# Lo único que `update_conversation` puede tocar. Vive aquí y no en db.py para
+# que MemoryStore rechace exactamente lo mismo que Postgres: si aceptara
+# cualquier campo, un nombre mal escrito pasaría todas las pruebas y reventaría
+# el turno en producción — la misma distancia entre pruebas y base de verdad
+# que escondió el fallo del relay.
+COLUMNAS_DE_CONVERSACION = frozenset(
+    {
+        "crm_conversation_id",
+        "phase",
+        "greeted",
+        "media_notice_sent",
+        "followup_due_at",
+        "followup_sent",
+        "last_inbound_at",
+        "stalled_at",
+        "stall_since_message_id",
+    }
+)
 
 
 # ---------------------------------------------------------------- modelos ---
@@ -43,8 +65,11 @@ class Conversation:
     followup_sent: bool = False
     last_inbound_at: datetime | None = None
     # Puesta cuando el agente cierra por conversación sin rumbo: mientras
-    # viva, el turno guarda silencio (ver app/stall.py).
+    # viva, el relleno se contesta con silencio (ver app/stall.py).
     stalled_at: datetime | None = None
+    # El candado cuenta solo los mensajes con id mayor a este: se mueve al
+    # reabrir, para que el hilo viejo no vuelva a disparar el cierre.
+    stall_since_message_id: int = 0
 
 
 @dataclass
@@ -64,18 +89,6 @@ class OfferedSlot:
     end_utc: datetime | None
     label: str
     offered_at: datetime = field(default_factory=utcnow)
-
-
-@dataclass
-class RelayItem:
-    id: int
-    body: bytes
-    signature: str | None
-    attempts: int
-    created_at: datetime
-    next_retry_at: datetime
-    delivered_at: datetime | None = None
-    abandoned_at: datetime | None = None
 
 
 @dataclass
@@ -104,7 +117,7 @@ class PendingSend:
 
 @dataclass
 class InboundMessage:
-    """Mensaje entrante ya parseado del webhook de Meta."""
+    """Un mensaje del cliente, como lo trae el despacho del CRM."""
 
     wa_message_id: str | None
     identity: str
@@ -120,6 +133,13 @@ class InboundMessage:
     media_voice: bool = False
     location: dict[str, Any] | None = None
     contact_names: list[str] = field(default_factory=list)
+    # 031 — Por dónde escribe: whatsapp, instagram, messenger, tiktok… Lo
+    # dice el despacho (`conversation.channel`); None si no lo dijo.
+    channel: str | None = None
+    # 033 — Una conversación de prueba del Laboratorio (`conversation.test` del
+    # despacho). La respuesta la guarda el CRM sin enviarla; aquí no pasa por
+    # ALLOWED_WA_IDS (la identidad es sintética) ni programa seguimiento.
+    prueba: bool = False
 
 
 # --------------------------------------------------------------- contrato ---
@@ -128,19 +148,17 @@ class InboundMessage:
 class Store(Protocol):
     """Contrato de persistencia del bot (Postgres real o memoria en tests)."""
 
+    async def enqueue_dispatch(self, org: str, payload: dict[str, Any]) -> None: ...
+    def claim_dispatch(self) -> AbstractAsyncContextManager[DispatchJob | None]: ...
+
     # dedup
     async def mark_processed(self, wa_message_id: str) -> bool:
         """True si el mensaje es nuevo (gana el INSERT); False si ya se procesó."""
         ...
 
-    # cola de relay
-    async def enqueue_relay(self, body: bytes, signature: str | None) -> int: ...
-    async def due_relays(self, now: datetime) -> list[RelayItem]: ...
-    async def mark_relay_delivered(self, relay_id: int) -> None: ...
-    async def mark_relay_abandoned(self, relay_id: int) -> None: ...
-    async def reschedule_relay(
-        self, relay_id: int, attempts: int, next_retry_at: datetime
-    ) -> None: ...
+    async def already_processed(self, marcas: list[str]) -> set[str]:
+        """Cuáles de estas marcas ya existen. Solo consulta: no marca nada."""
+        ...
 
     # conversaciones
     async def get_or_create_conversation(
@@ -153,6 +171,17 @@ class Store(Protocol):
     async def reset_conversation(self, conversation_id: int) -> None:
         """Borra historial + slots y regresa la conversación a estado inicial
         (comando /reset de la línea de pruebas)."""
+        ...
+    async def forget_conversation(
+        self, organization_id: str, wa_identity: str, crm_conversation_id: str
+    ) -> bool:
+        """Borra TODO lo que Nea guarda de esa conversación: la fila, su
+        historial, sus horarios ofrecidos y sus envíos pendientes.
+
+        Solo si la fila sigue siendo de `crm_conversation_id` (o todavía no
+        sabe de cuál es). El aviso de borrado puede llegar tarde: si la persona
+        ya volvió a escribir, la fila es de la conversación NUEVA y borrarla
+        le quitaría la memoria a la que no se eliminó. True si borró algo."""
         ...
 
     # historial LLM
@@ -204,13 +233,12 @@ class Store(Protocol):
 # ------------------------------------------------------- fake en memoria ---
 
 
-class MemoryStore:
+class MemoryStore(MemoryDispatchStore):
     """Implementación en memoria del Store — solo para tests."""
 
     def __init__(self) -> None:
         self._ids = itertools.count(1)
         self.processed: set[str] = set()
-        self.relays: dict[int, RelayItem] = {}
         self.conversations: dict[int, Conversation] = {}
         self._conv_by_identity: dict[tuple[str, str], int] = {}
         self.messages: list[BotMessage] = []
@@ -223,34 +251,8 @@ class MemoryStore:
         self.processed.add(wa_message_id)
         return True
 
-    async def enqueue_relay(self, body: bytes, signature: str | None) -> int:
-        rid = next(self._ids)
-        now = utcnow()
-        self.relays[rid] = RelayItem(
-            id=rid, body=body, signature=signature, attempts=0,
-            created_at=now, next_retry_at=now,
-        )
-        return rid
-
-    async def due_relays(self, now: datetime) -> list[RelayItem]:
-        return [
-            r for r in sorted(self.relays.values(), key=lambda r: r.id)
-            if r.delivered_at is None and r.abandoned_at is None
-            and r.next_retry_at <= now
-        ]
-
-    async def mark_relay_delivered(self, relay_id: int) -> None:
-        self.relays[relay_id].delivered_at = utcnow()
-
-    async def mark_relay_abandoned(self, relay_id: int) -> None:
-        self.relays[relay_id].abandoned_at = utcnow()
-
-    async def reschedule_relay(
-        self, relay_id: int, attempts: int, next_retry_at: datetime
-    ) -> None:
-        item = self.relays[relay_id]
-        item.attempts = attempts
-        item.next_retry_at = next_retry_at
+    async def already_processed(self, marcas: list[str]) -> set[str]:
+        return {m for m in marcas if m in self.processed}
 
     async def get_or_create_conversation(
         self,
@@ -261,7 +263,11 @@ class MemoryStore:
         clave = (organization_id, wa_identity)
         cid = self._conv_by_identity.get(clave)
         if cid is not None:
-            return self.conversations[cid]
+            conv = self.conversations[cid]
+            # Igual que el ON CONFLICT de PgStore: el slug se refresca, porque
+            # un miembro puede renombrar su subdominio y el id no cambia.
+            conv.organization_slug = organization_slug
+            return conv
         cid = next(self._ids)
         conv = Conversation(
             id=cid,
@@ -274,6 +280,11 @@ class MemoryStore:
         return conv
 
     async def update_conversation(self, conversation_id: int, **fields: Any) -> None:
+        desconocidas = set(fields) - COLUMNAS_DE_CONVERSACION
+        if desconocidas:
+            raise ValueError(
+                f"columnas desconocidas en update_conversation: {desconocidas}"
+            )
         conv = self.conversations[conversation_id]
         for key, value in fields.items():
             setattr(conv, key, value)
@@ -290,6 +301,26 @@ class MemoryStore:
         conv.followup_due_at = None
         conv.followup_sent = False
         conv.stalled_at = None
+
+    async def forget_conversation(
+        self, organization_id: str, wa_identity: str, crm_conversation_id: str
+    ) -> bool:
+        clave = (organization_id, wa_identity)
+        cid = self._conv_by_identity.get(clave)
+        if cid is None:
+            return False
+        actual = self.conversations[cid].crm_conversation_id
+        if actual is not None and actual != crm_conversation_id:
+            return False
+        del self._conv_by_identity[clave]
+        del self.conversations[cid]
+        self.messages = [m for m in self.messages if m.conversation_id != cid]
+        self.offered.pop(cid, None)
+        self.pending_sends = {
+            pid: p for pid, p in self.pending_sends.items()
+            if p.conversation_id != cid
+        }
+        return True
 
     async def add_message(
         self,
@@ -408,13 +439,20 @@ class AppContext:
     # (organization_id, slug) del turno en curso. La pone el despacho al armar
     # el contexto del turno; None fuera del modo multi-organización.
     organizacion: tuple[str, str] | None = None
-    coalescer: Any | None = None
-    relay_wake: asyncio.Event = field(default_factory=asyncio.Event)
+    dispatch_wake: asyncio.Event = field(default_factory=asyncio.Event)
+    # 031 — Cuándo llegó el último webhook de Meta a Nea, que desde la 2.0 ya
+    # no lo recibe (app/webhook_retirado.py). Lo enseña /health.
+    webhook_meta_ultimo: datetime | None = None
     # ¿El CRM de esta instancia tiene motor de agenda? Vocero lo trae detrás de
-    # una bandera de despliegue y viene apagado por defecto. Se resuelve al
-    # arrancar (y se corrige solo si en caliente resulta que no está), para no
+    # una bandera de despliegue y viene apagado por defecto. Es lo que vale en
+    # el turno en curso: el turno lo refresca al empezar desde `agenda_sonda`
+    # (y una herramienta lo apaga si choca con el 404 de la bandera), para no
     # ofrecerle horarios a un lead contra un CRM que no puede agendarlos.
     agenda_enabled: bool = True
+    # La respuesta del CRM con caducidad (app/agenda.py): encender o apagar
+    # AGENDA allá llega sin reiniciar Nea. None = sin sonda (pruebas que fijan
+    # `agenda_enabled` a mano).
+    agenda_sonda: Any | None = None
     # Un candado por identidad: los turnos de UNA conversación se serializan.
     # Sin esto, una ráfaga que llega mientras el turno anterior sigue en vuelo
     # abre un segundo turno con contexto viejo (se reservó una cita antes de

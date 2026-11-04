@@ -11,8 +11,11 @@ usarlos sin exponer nada técnico al lead.
 from __future__ import annotations
 
 import base64
-import io
+import asyncio
 import logging
+import os
+import sys
+from pathlib import Path
 
 from dataclasses import dataclass
 
@@ -102,16 +105,30 @@ async def _image(ctx: AppContext, msg: InboundMessage) -> MediaPart:
     )
 
 
-def _pdf_text(data: bytes) -> str | None:
-    from pypdf import PdfReader
+_pdf_slots = asyncio.Semaphore(2)
 
-    reader = PdfReader(io.BytesIO(data))
-    chunks: list[str] = []
-    for page in reader.pages[:PDF_MAX_PAGES]:
-        chunks.append(page.extract_text() or "")
-        if sum(len(c) for c in chunks) > PDF_MAX_CHARS:
-            break
-    return "\n".join(chunks)
+
+async def _pdf_text(data: bytes) -> str | None:
+    if len(data) > MAX_MEDIA_BYTES:
+        return None
+    # The timeout includes queueing: excess load cannot accumulate parser jobs.
+    async with asyncio.timeout(6):
+        async with _pdf_slots:
+            process = await asyncio.create_subprocess_exec(
+                sys.executable, "-I", str(Path(__file__).with_name("pdf_extract.py")),
+                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+                env={key: os.environ[key] for key in ("SYSTEMROOT", "WINDIR") if key in os.environ},
+            )
+            try:
+                stdout, _ = await process.communicate(data)
+                if process.returncode != 0:
+                    return None
+                return stdout[:32000].decode("utf-8", errors="replace")[:PDF_MAX_CHARS]
+            finally:
+                if process.returncode is None:
+                    process.kill()
+                await process.wait()
 
 
 async def _document(ctx: AppContext, msg: InboundMessage) -> MediaPart:
@@ -124,7 +141,7 @@ async def _document(ctx: AppContext, msg: InboundMessage) -> MediaPart:
     mime_clean = (mime or msg.media_mime or "").split(";")[0].strip()
     text: str | None = None
     if mime_clean == "application/pdf" or filename.lower().endswith(".pdf"):
-        text = _pdf_text(data)
+        text = await _pdf_text(data)
     elif mime_clean.startswith("text/"):
         text = data.decode("utf-8", errors="replace")
     if not text or not text.strip():
