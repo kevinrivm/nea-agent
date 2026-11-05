@@ -19,6 +19,12 @@ Qué cambia en cada versión de Nea y qué hacer al actualizar. Cada tag
   y que hace que no se registren como oferta. Firmado con el secreto del
   despliegue, como el despacho. Solo en multi-organización; fuera, 404.
 
+### Seguridad
+
+- **`pypdf` 6.21.2 → 6.21.4**: cierra siete CVE (CVE-2026-119203 a
+  CVE-2026-119209) que hacían fallar `pip-audit` en el job `verify`. Es la
+  librería que lee los PDF del conocimiento.
+
 ## 2.0.2 — 2026-10-22
 
 ### Arreglado
