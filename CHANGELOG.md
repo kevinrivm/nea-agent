@@ -4,6 +4,21 @@ Qué cambia en cada versión de Nea y qué hacer al actualizar. Cada tag
 `vX.Y.Z` publica la imagen `ghcr.io/kevinrivm/nea-agent:X.Y.Z` (README,
 «Instalar»).
 
+## Sin publicar
+
+### Nuevo
+
+- **Modo de ensayo para Vocero Cloud** (`POST /vocero/ensayo`, `app/ensayo.py`;
+  fase 1c de vocerocrm-cloud). El CRM manda una conversación de mentira y Nea
+  la contesta con el turno de siempre —mismo prompt, mismas herramientas, la
+  configuración real del negocio y su llave de OpenRouter por
+  `/api/brains/llm`—, pero no manda nada, no escribe en la bandeja ni en su
+  memoria (corre sobre un `MemoryStore` que muere con la petición) y agendar
+  devuelve una cita simulada. Consulta los huecos de verdad con la ficha del
+  ensayo, que el CRM firma para esa organización y esa conversación inventada
+  y que hace que no se registren como oferta. Firmado con el secreto del
+  despliegue, como el despacho. Solo en multi-organización; fuera, 404.
+
 ## 2.0.2 — 2026-10-22
 
 ### Arreglado
