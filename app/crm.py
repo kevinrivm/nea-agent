@@ -340,8 +340,11 @@ class CrmClient:
         limit: int = 12,
         per_day: int | None = None,
         days: int | None = None,
+        agenda_id: str | None = None,
     ) -> dict[str, Any]:
         """Huecos + `query`: hasta dónde llega lo consultado.
+
+        `agenda_id` no viaja: el CRM raíz tiene una sola agenda.
 
         `query` es None contra un CRM que todavía no la manda; quien consume
         tiene que tratar entonces la lista como parcial. `date` lo ignora un
