@@ -299,6 +299,41 @@ def _enlace(cita: dict) -> str:
     return ""
 
 
+def _lineas_profesionales(context: dict | None) -> list[str]:
+    """vocero-cloud 233 — un número, varios profesionales.
+
+    Sin `booking.agendas` (una sola agenda, o un CRM de antes) no se dice
+    nada: preguntar «¿con quién?» en un negocio de una persona confunde.
+    """
+    booking = (context or {}).get("booking")
+    crudas = booking.get("agendas") if isinstance(booking, dict) else None
+    if not isinstance(crudas, list):
+        return []
+    pros = [
+        a for a in crudas
+        if isinstance(a, dict) and isinstance(a.get("name"), str) and a["name"].strip()
+    ]
+    if not pros:
+        return []
+    lista = "; ".join(
+        a["name"].strip() + (f" ({a['description'].strip()})" if isinstance(a.get("description"), str) and a["description"].strip() else "")
+        for a in pros
+    )
+    if len(pros) == 1:
+        return [f"- Las citas son con {pros[0]['name'].strip()}. Dilo al ofrecer y al confirmar."]
+    return [
+        f"- PROFESIONALES de este negocio (cada uno con su agenda): {lista}.",
+        "- Antes de ofrecer horarios averigua con quién o para qué es la cita, "
+        "con lo que atiende cada uno. Si ya lo dijo, llama propose_slots con "
+        "profesional. Si le da igual, llama propose_slots sin profesional: cada "
+        "horario dice con quién es. Si no queda claro a cuál le toca, pregúntale; "
+        "NUNCA elijas por él a alguien que no atiende lo que pidió.",
+        "- Al ofrecer y al confirmar di SIEMPRE con quién es el horario, tal "
+        "cual viene en su etiqueta. Si después pide a otro profesional, consulta "
+        "de nuevo con ese profesional: los horarios de uno no sirven para otro.",
+    ]
+
+
 def _booking_lines(booking: object, now: datetime) -> list[str]:
     """Las citas del lead según el CRM.
 
@@ -451,6 +486,7 @@ def build_system_prompt(
     )
     if agenda:
         lines.append(f"- Calendario (para la fecha de propose_slots): {calendario(now, tz)}.")
+        lines.extend(_lineas_profesionales(context))
         if not recordatorios:
             # En el e2e contra el CRM raíz, tras confirmar la hora de la cita:
             # «¿Te mando un recordatorio antes de la sesión?». Ese CRM no
