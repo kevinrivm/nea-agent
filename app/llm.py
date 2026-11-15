@@ -52,27 +52,33 @@ class Llm(Protocol):
     ) -> str: ...
 
 
-# Los proveedores compatibles piden el formato aparte del binario. WhatsApp
-# manda notas de voz en OGG/Opus; el resto se deduce del mime y, si no se
-# reconoce, se manda como ogg en vez de fallar antes de intentarlo.
+# Los proveedores compatibles piden el formato aparte del binario, y ese campo
+# es una etiqueta para el enum de su pasarela, no una promesa sobre el
+# contenedor: el modelo decodifica el audio real por su contenido. Algunas
+# pasarelas (NVIDIA NIM, por ejemplo) solo admiten `wav` y `mp3` y responden 400
+# con cualquier otro valor, asi que mandar el contenedor de verdad (`ogg`,
+# `webm`, `m4a`...) dejaba sin transcribir todas las notas de voz de WhatsApp,
+# que llegan en OGG/Opus. Se manda lo que la pasarela acepta; el audio viaja
+# igual. Lo que no se reconoce se manda como mp3 en vez de rendirse antes de
+# intentarlo.
 _FORMATOS = {
-    "audio/ogg": "ogg",
-    "audio/opus": "ogg",
+    "audio/ogg": "mp3",
+    "audio/opus": "mp3",
     "audio/mpeg": "mp3",
     "audio/mp3": "mp3",
-    "audio/mp4": "m4a",
-    "audio/m4a": "m4a",
-    "audio/x-m4a": "m4a",
+    "audio/mp4": "mp3",
+    "audio/m4a": "mp3",
+    "audio/x-m4a": "mp3",
     "audio/wav": "wav",
     "audio/x-wav": "wav",
-    "audio/webm": "webm",
-    "audio/flac": "flac",
-    "audio/aac": "aac",
+    "audio/webm": "mp3",
+    "audio/flac": "mp3",
+    "audio/aac": "mp3",
 }
 
 
 def _formato_de_audio(mime: str) -> str:
-    return _FORMATOS.get((mime or "").split(";")[0].strip().lower(), "ogg")
+    return _FORMATOS.get((mime or "").split(";")[0].strip().lower(), "mp3")
 
 
 # Segundos por intento, el default de LLM_TIMEOUT_SECONDS (ver config.py).

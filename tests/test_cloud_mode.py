@@ -470,16 +470,37 @@ class TestAudio:
     def test_el_formato_sale_del_mime(self) -> None:
         from app.llm import _formato_de_audio
 
-        # WhatsApp manda las notas de voz en OGG/Opus.
-        assert _formato_de_audio("audio/ogg; codecs=opus") == "ogg"
-        assert _formato_de_audio("audio/mpeg") == "mp3"
+        # WhatsApp manda las notas de voz en OGG/Opus, pero este campo es la
+        # etiqueta del enum de la pasarela, no el contenedor: NVIDIA NIM solo
+        # acepta wav y mp3. El modelo decodifica el audio real por su contenido.
+        assert _formato_de_audio("audio/ogg; codecs=opus") == "mp3"
+        assert _formato_de_audio("audio/wav") == "wav"
 
     def test_un_mime_desconocido_no_frena_el_intento(self) -> None:
-        # Mejor intentarlo como ogg que rendirse antes de probar.
+        # Mejor intentarlo con una etiqueta que la pasarela acepta que
+        # rendirse antes de probar.
         from app.llm import _formato_de_audio
 
-        assert _formato_de_audio("audio/rarisimo") == "ogg"
-        assert _formato_de_audio("") == "ogg"
+        assert _formato_de_audio("audio/rarisimo") == "mp3"
+        assert _formato_de_audio("") == "mp3"
+
+    def test_la_pasarela_solo_recibe_formatos_que_acepta(self) -> None:
+        # NVIDIA NIM responde 400 con cualquier `input_audio.format` fuera de
+        # {wav, mp3}. Una nota de voz de WhatsApp es OGG/Opus: con "ogg" toda
+        # nota se quedaba sin transcribir y el turno degradaba en silencio.
+        from app.llm import _FORMATOS, _formato_de_audio
+
+        assert set(_FORMATOS.values()) <= {"wav", "mp3"}
+        for mime in (
+            "audio/ogg; codecs=opus",
+            "audio/opus",
+            "audio/webm",
+            "audio/flac",
+            "audio/m4a",
+            "application/octet-stream",
+            "",
+        ):
+            assert _formato_de_audio(mime) in {"wav", "mp3"}
 
     def test_whisper_con_otro_proveedor_se_detecta_al_arrancar(self) -> None:
         # `whisper-1` no existe fuera de OpenAI: esa combinación hace fallar

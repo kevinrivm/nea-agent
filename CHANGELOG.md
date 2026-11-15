@@ -6,6 +6,15 @@ Qué cambia en cada versión de Nea y qué hacer al actualizar. Cada tag
 
 ## Sin publicar
 
+### Arreglado
+
+- **Las notas de voz se transcriben también con proveedores que solo aceptan
+  `wav` y `mp3`** (`app/llm.py`). El campo `input_audio.format` es una etiqueta
+  para el enum de la pasarela, no el contenedor real: el modelo decodifica el
+  audio por su contenido. Mandar `ogg` —lo que manda WhatsApp en cada nota de
+  voz— hacía que NVIDIA NIM respondiera 400 y que toda nota se degradara en
+  silencio. Ahora se manda `mp3`, salvo `wav`, que se manda como `wav`.
+
 ### Nuevo
 
 - **Modo de ensayo para Vocero Cloud** (`POST /vocero/ensayo`, `app/ensayo.py`;
