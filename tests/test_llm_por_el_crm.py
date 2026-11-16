@@ -136,7 +136,13 @@ async def test_apunta_al_proxy_con_la_llave_del_bot_y_el_modelo_del_perfil(respx
     assert cuerpo["model"] == "z-ai/glm-5.3"
     # Los ajustes de velocidad viajan igual: el CRM reenvía el cuerpo tal cual.
     assert cuerpo["reasoning"] == {"effort": "minimal"}
-    assert cuerpo["provider"] == {"sort": "throughput"}
+    # Y con ellos el candado de privacidad, que el CRM vuelve a poner al
+    # reenviar (`sinEntrenamiento` en llm-proxy.ts): puesto dos veces a
+    # propósito, porque ninguno de los dos lados puede confiar en el otro.
+    assert cuerpo["provider"] == {
+        "data_collection": "deny",
+        "sort": "throughput",
+    }
 
 
 async def test_sin_ia_en_el_perfil_usa_LLM_MODEL(respx_mock):

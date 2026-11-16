@@ -57,7 +57,12 @@ class TestLoQueViajaEnLaLlamada:
 
         enviado = json.loads(ruta.calls.last.request.content)
         assert enviado["reasoning"] == {"effort": "minimal"}
-        assert enviado["provider"] == {"sort": "throughput"}
+        # El candado de privacidad convive con el ajuste de velocidad: uno no
+        # pisa al otro.
+        assert enviado["provider"] == {
+            "data_collection": "deny",
+            "sort": "throughput",
+        }
         # El tope sigue sin existir: que no vuelva por la puerta de atras.
         assert "max_tokens" not in enviado
 
@@ -72,7 +77,9 @@ class TestLoQueViajaEnLaLlamada:
 
         enviado = json.loads(ruta.calls.last.request.content)
         assert "reasoning" not in enviado
-        assert "provider" not in enviado
+        # `provider` SI viaja aunque no se haya pedido ningun ajuste: lleva el
+        # candado de privacidad, que no es opcional.
+        assert enviado["provider"] == {"data_collection": "deny"}
 
 
 class TestElSeguro:
