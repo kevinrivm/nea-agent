@@ -8,6 +8,14 @@ Qué cambia en cada versión de Nea y qué hacer al actualizar. Cada tag
 
 ### Nuevo
 
+- **Varios profesionales con un número** (vocerocrm-cloud 233). Cuando el CRM
+  manda `booking.agendas`, el prompt lista a los profesionales con lo que
+  atiende cada uno: Nea pregunta con quién o para qué antes de ofrecer, llama a
+  `propose_slots` con `profesional` (nombre o id) y dice con quién es cada
+  horario. Si al lead le da igual, pide los de todos. Con una sola agenda no
+  cambia nada. Actualizar después del CRM: una Nea de antes sigue reservando
+  bien contra el CRM nuevo.
+
 - **Modo de ensayo para Vocero Cloud** (`POST /vocero/ensayo`, `app/ensayo.py`;
   fase 1c de vocerocrm-cloud). El CRM manda una conversación de mentira y Nea
   la contesta con el turno de siempre —mismo prompt, mismas herramientas, la
