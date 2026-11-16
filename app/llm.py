@@ -22,6 +22,22 @@ from openai import AsyncOpenAI
 
 logger = logging.getLogger("nea.llm")
 
+# Ningun proveedor que entrene con lo que hablan los leads.
+#
+# `data_collection: "deny"` le dice a OpenRouter que no enrute a endpoints que
+# se queden con los datos. Va en CADA llamada -- tambien en la que transcribe
+# la nota de voz, que es la voz de una persona.
+#
+# NO es uno de los ajustes de velocidad de abajo: esos se apagan solos si el
+# proveedor se queja, y este no puede. Si un proveedor lo rechazara, la llamada
+# falla y el turno degrada en silencio, que es lo correcto: reintentar sin el
+# candado seria mandar la conversacion justo a donde dijimos que no la
+# mandabamos.
+#
+# El equipo de seguridad de Google pidio por escrito (14 sept 2026, expediente
+# de la app OAuth) los flags que impiden el entrenamiento. Esto es ese flag.
+SIN_ENTRENAMIENTO: dict[str, Any] = {"data_collection": "deny"}
+
 
 class LlmExhausted(Exception):
     """El LLM falló todos los reintentos — el turno debe degradar en silencio."""
@@ -191,6 +207,7 @@ class OpenAiLlm:
             try:
                 resp = await self._client.chat.completions.create(
                     model=self._transcribe_model,
+                    extra_body={"provider": dict(SIN_ENTRENAMIENTO)},
                     messages=[
                         {
                             "role": "user",
@@ -235,18 +252,22 @@ class OpenAiLlm:
         Van por `extra_body` a proposito: OpenRouter los entiende y un
         proveedor que no, los ignora en vez de fallar.
 
+        `provider.data_collection` NO es uno de estos ajustes aunque viaje en
+        el mismo sitio: sigue puesto aunque `_extras_ok` este apagado. Ver
+        `SIN_ENTRENAMIENTO`.
+
         OJO con `reasoning: {"exclude": true}`: parece lo mismo que "minimal"
         y no lo es. Oculta el razonamiento de la respuesta pero el modelo lo
         SIGUE generando - medido en huaraches el 8-sep: 650 tokens y 19.7 s de
         mediana contra 67 y 7.7 s con "minimal". Que nadie lo "mejore".
         """
+        extra: dict[str, Any] = {"provider": dict(SIN_ENTRENAMIENTO)}
         if not self._extras_ok:
-            return {}
-        extra: dict[str, Any] = {}
+            return extra
         if self._reasoning_effort:
             extra["reasoning"] = {"effort": self._reasoning_effort}
         if self._provider_sort:
-            extra["provider"] = {"sort": self._provider_sort}
+            extra["provider"]["sort"] = self._provider_sort
         return extra
 
     def _quiza_por_los_extras(self, exc: Exception) -> None:
