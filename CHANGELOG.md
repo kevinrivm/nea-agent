@@ -4,6 +4,20 @@ Qué cambia en cada versión de Nea y qué hacer al actualizar. Cada tag
 `vX.Y.Z` publica la imagen `ghcr.io/kevinrivm/nea-agent:X.Y.Z` (README,
 «Instalar»).
 
+## Sin publicar
+
+### Nuevo
+
+- **Sectores de cumplimiento en el perfil** (`profile.sector`, spec 067 de
+  vocero-crm). El dueño elige en la pantalla Agente del CRM a qué se dedica su
+  negocio; las reglas del rubro ya están escritas, curadas y probadas aquí. Con
+  `estetica_salud`, el chasis suma — con la misma autoridad que los NUNCA — que
+  el agente no diagnostica, no promete resultados estéticos ni juzga fotos del
+  caso, y escala a una persona las dudas clínicas, los procedimientos invasivos
+  y las quejas sobre resultados. Sin `sector` (o con una clave desconocida),
+  el chasis queda byte a byte como siempre: una instalación que actualiza no
+  cambia de comportamiento hasta que alguien elija un sector.
+
 ## 2.0.2 — 2026-10-22
 
 ### Arreglado

@@ -58,6 +58,28 @@ def test_profile_from_payload_tolerante_a_vacios():
     assert not prof.has_knowledge
 
 
+def test_profile_from_payload_mapea_sector():
+    # 067 — El sector viaja en el perfil del CRM; el lookup del pack (si la
+    # clave existe, qué reglas trae) es del chasis, no del perfil.
+    prof = profile_from_payload(
+        {**PAYLOAD, "profile": {**PAYLOAD["profile"], "sector": "estetica_salud"}},
+        default_name="Nea",
+    )
+    assert prof.sector == "estetica_salud"
+
+
+def test_profile_sin_sector_o_blanco_es_general():
+    # Sin sector (un CRM de antes de la 067) o en blanco → None: sin pack.
+    assert profile_from_payload(PAYLOAD, default_name="Nea").sector is None
+    prof = profile_from_payload(
+        {**PAYLOAD, "profile": {**PAYLOAD["profile"], "sector": "   "}},
+        default_name="Nea",
+    )
+    assert prof.sector is None
+    # Y el perfil mínimo sigue siendo exactamente el de siempre.
+    assert BusinessProfile(agent_name="Nea").sector is None
+
+
 def test_kb_centinela_del_crm_no_cuenta_como_conocimiento():
     # El CRM renderiza el KB vacío como "(knowledge base vacío)" (contrato
     # 009): eso NO es conocimiento — sin instrucciones, el chasis debe seguir
