@@ -53,6 +53,11 @@ class BusinessProfile:
     # CRM que todavía no las manda.
     role: str = "calificador"
     tools: frozenset[str] | None = None
+    # 067 — El sector del negocio (claves del catálogo del CRM:
+    # src/lib/agent-sectores.ts). `None` o desconocido = General: sin pack de
+    # cumplimiento. Las reglas de cada sector las escribe y prueba este repo
+    # (app/prompt.py, SECTOR_PACKS); el CRM solo dice a qué se dedica.
+    sector: str | None = None
     # 036 — Con qué piensa el negocio cuando Nea piensa por el CRM (bloque
     # `llm` del perfil): la ruta del proxy y el modelo de Ajustes → IA. `None`
     # = el CRM no tiene IA configurada, o no lo dice (un CRM anterior, el
@@ -94,6 +99,7 @@ def profile_from_payload(payload: dict[str, Any], default_name: str) -> Business
         resources=resources,
         role=str(prof.get("role") or "calificador"),
         tools=_herramientas(prof.get("tools")),
+        sector=_sector(prof.get("sector")),
         **_ia(payload.get("llm")),
     )
 
@@ -119,6 +125,20 @@ def _herramientas(valor: Any) -> frozenset[str] | None:
     if not isinstance(valor, list):
         return None
     return frozenset(str(v) for v in valor if isinstance(v, str))
+
+
+def _sector(valor: Any) -> str | None:
+    """La clave del sector tal como la manda el CRM; `None` = General.
+
+    Se guarda sin validar contra SECTOR_PACKS a propósito (mismo criterio que
+    `role` y `tools`): una Nea que no conoce el sector lo ignora, y una más
+    nueva lo toma si lo tiene. Un cerebro nunca falla por un sector que no
+    sabe quién es.
+    """
+    if not isinstance(valor, str):
+        return None
+    texto = valor.strip()
+    return texto or None
 
 
 def profile_from_brief(path: Path, default_name: str) -> BusinessProfile | None:
