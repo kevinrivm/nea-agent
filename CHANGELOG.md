@@ -8,6 +8,25 @@ Qué cambia en cada versión de Nea y qué hacer al actualizar. Cada tag
 
 ### Nuevo
 
+- **Varios profesionales con un número** (vocerocrm-cloud 233). Cuando el CRM
+  manda `booking.agendas`, el prompt lista a los profesionales con lo que
+  atiende cada uno: Nea pregunta con quién o para qué antes de ofrecer, llama a
+  `propose_slots` con `profesional` (nombre o id) y dice con quién es cada
+  horario. Si al lead le da igual, pide los de todos. Con una sola agenda no
+  cambia nada. Actualizar después del CRM: una Nea de antes sigue reservando
+  bien contra el CRM nuevo.
+
+- **Modo de ensayo para Vocero Cloud** (`POST /vocero/ensayo`, `app/ensayo.py`;
+  fase 1c de vocerocrm-cloud). El CRM manda una conversación de mentira y Nea
+  la contesta con el turno de siempre —mismo prompt, mismas herramientas, la
+  configuración real del negocio y su llave de OpenRouter por
+  `/api/brains/llm`—, pero no manda nada, no escribe en la bandeja ni en su
+  memoria (corre sobre un `MemoryStore` que muere con la petición) y agendar
+  devuelve una cita simulada. Consulta los huecos de verdad con la ficha del
+  ensayo, que el CRM firma para esa organización y esa conversación inventada
+  y que hace que no se registren como oferta. Firmado con el secreto del
+  despliegue, como el despacho. Solo en multi-organización; fuera, 404.
+
 - **Sectores de cumplimiento en el perfil** (`profile.sector`, spec 067 de
   vocero-crm). El dueño elige en la pantalla Agente del CRM a qué se dedica su
   negocio; las reglas del rubro ya están escritas, curadas y probadas aquí. Con
@@ -17,6 +36,12 @@ Qué cambia en cada versión de Nea y qué hacer al actualizar. Cada tag
   y las quejas sobre resultados. Sin `sector` (o con una clave desconocida),
   el chasis queda byte a byte como siempre: una instalación que actualiza no
   cambia de comportamiento hasta que alguien elija un sector.
+
+### Seguridad
+
+- **`pypdf` 6.21.2 → 6.21.4**: cierra siete CVE (CVE-2026-119203 a
+  CVE-2026-119209) que hacían fallar `pip-audit` en el job `verify`. Es la
+  librería que lee los PDF del conocimiento.
 
 ## 2.0.2 — 2026-10-22
 

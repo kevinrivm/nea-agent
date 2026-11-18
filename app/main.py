@@ -23,6 +23,7 @@ from app.config import Settings
 from app.crm import CrmClient
 from app.crm_brains import BrainsCrmClient
 from app.dispatch import router as dispatch_router
+from app.ensayo import router as ensayo_router
 from app.dispatch_worker import run as run_dispatch_worker
 from app.db import PgStore
 from app.followup import FollowupWorker
@@ -288,6 +289,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     # ya no se recibe, contesta 503 para que Meta reintente mientras quien
     # instala lo devuelve al CRM.
     app.include_router(dispatch_router)
+    app.include_router(ensayo_router)
     app.include_router(webhook_retirado_router)
 
     @app.get("/health")

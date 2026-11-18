@@ -26,6 +26,7 @@ idempotentes al arranque · httpx (CRM y OpenAI) · pytest + respx · Docker
 | Con qué piensa (llave propia o la del CRM por `/api/bot/llm`) | `app/llm.py` (`LlmPorElCrm`) · elección al arranque en `app/main.py` (`_llm_del_arranque`) |
 | Vocero multitenant (modo cloud) | `app/crm_brains.py` (salida por `/api/brains/*`) |
 | Atender a VARIOS negocios a la vez | `app/multiorg.py` |
+| El ensayo: el dueño prueba a su agente sin WhatsApp (cloud) | `app/ensayo.py` — el turno de siempre sobre un CRM que solo lee y una memoria que muere con la petición |
 | El webhook de Meta que ya no se recibe (503) | `app/webhook_retirado.py` |
 | Seguimiento | `app/followup.py` |
 | Lo que el lead ve en WhatsApp (Markdown → WhatsApp) | `app/formato.py` |

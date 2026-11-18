@@ -1,0 +1,77 @@
+name: imagen-dev
+
+# La imagen del entorno dev de Vocero Cloud se construye aquí y no en el VPS.
+#
+# Dev vive en el Coolify del VPS de Aisha, que comparte máquina con otros
+# servicios: compilar ahí le quitaría la CPU a todos. Este workflow arma la
+# imagen de cada push a `dev`, la sube como `nea-agent-dev:<commit>` y le pide
+# el deploy a ese Coolify, que solo la descarga (`Dockerfile.deploy`).
+#
+# Las imágenes públicas de versión (`v*`) siguen saliendo de `imagen.yml`.
+on:
+  push:
+    branches: [dev]
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+  workflow_dispatch:
+
+concurrency:
+  group: imagen-dev
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGEN: ghcr.io/${{ github.repository }}-dev
+
+jobs:
+  imagen:
+    name: construir · subir · desplegar (dev)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.IMAGEN }}:${{ github.sha }}
+          build-args: |
+            NEA_VERSION=dev
+            SOURCE_COMMIT=${{ github.sha }}
+          provenance: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Apagado hasta que exista la app: DEPLOY_DEV_DESDE_ACTIONS=on lo
+      # enciende. El token es de Coolify con permiso solo de `deploy`.
+      - name: Pedir el deploy al Coolify de dev
+        if: vars.DEPLOY_DEV_DESDE_ACTIONS == 'on'
+        env:
+          COOLIFY_URL: ${{ vars.COOLIFY_DEV_URL }}
+          COOLIFY_APP_UUID: ${{ vars.COOLIFY_DEV_APP_UUID }}
+          COOLIFY_DEPLOY_TOKEN: ${{ secrets.COOLIFY_DEV_DEPLOY_TOKEN }}
+        run: |
+          curl --fail-with-body --silent --show-error --max-time 60 --request POST \
+            -H "Authorization: Bearer $COOLIFY_DEPLOY_TOKEN" \
+            "$COOLIFY_URL/api/v1/deploy?uuid=$COOLIFY_APP_UUID"
+
+      - name: Borrar imágenes viejas de dev
+        continue-on-error: true
+        uses: actions/delete-package-versions@v5
+        with:
+          package-name: ${{ github.event.repository.name }}-dev
+          package-type: container
+          min-versions-to-keep: 2

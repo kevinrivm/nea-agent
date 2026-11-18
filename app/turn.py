@@ -37,6 +37,7 @@ from app.tools import (
     ToolRuntime,
     con_mover_etapa,
     etapas_siguientes,
+    profesionales_del_contexto,
     solo_encendidas,
     tool_schemas,
 )
@@ -448,6 +449,7 @@ async def run_turn(
         tz=tz,
         conversacion_reciente=_conversacion_reciente(history),
         etapas=etapas_siguientes(context),
+        profesionales=profesionales_del_contexto(context),
     )
     try:
         final_text = await _tool_loop(ctx, messages, runtime)

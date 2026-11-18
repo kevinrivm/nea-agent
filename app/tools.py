@@ -92,6 +92,15 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "profesional": {
+                        "type": "string",
+                        "description": (
+                            "Opcional, solo si el negocio tiene PROFESIONALES "
+                            "en el contexto: el nombre de con quién quiere el "
+                            "lead. Sin él te doy los horarios de todos, cada "
+                            "uno dice con quién es."
+                        ),
+                    },
                     "fecha": {
                         "type": "string",
                         "description": (
@@ -227,6 +236,47 @@ MOVE_STAGE_SCHEMA: dict[str, Any] = {
         },
     },
 }
+
+
+def profesionales_del_contexto(context: dict[str, Any] | None) -> list[dict[str, str]]:
+    """vocero-cloud 233: los profesionales de `booking.agendas`; vacía con una sola agenda."""
+    booking = (context or {}).get("booking")
+    crudas = booking.get("agendas") if isinstance(booking, dict) else None
+    if not isinstance(crudas, list):
+        return []
+    out: list[dict[str, str]] = []
+    for a in crudas:
+        if not isinstance(a, dict):
+            continue
+        id_, name = a.get("id"), a.get("name")
+        if isinstance(id_, str) and id_ and isinstance(name, str) and name.strip():
+            desc = a.get("description")
+            out.append({"id": id_, "name": name.strip(), "description": desc.strip() if isinstance(desc, str) else ""})
+    return out
+
+
+def _sin_acentos(texto: str) -> str:
+    import unicodedata
+
+    return "".join(
+        c for c in unicodedata.normalize("NFD", texto.casefold()) if unicodedata.category(c) != "Mn"
+    )
+
+
+def resolver_profesional(valor: Any, profesionales: list[dict[str, str]]) -> dict[str, str] | None:
+    """El profesional que pidió el modelo, por id o por nombre («Dra. Pérez», «perez»)."""
+    if not isinstance(valor, str) or not valor.strip():
+        return None
+    v = valor.strip()
+    for p in profesionales:
+        if p["id"] == v:
+            return p
+    buscado = _sin_acentos(v).replace(".", "").strip()
+    exactos = [p for p in profesionales if _sin_acentos(p["name"]).replace(".", "").strip() == buscado]
+    if len(exactos) == 1:
+        return exactos[0]
+    parciales = [p for p in profesionales if buscado and buscado in _sin_acentos(p["name"]).replace(".", "")]
+    return parciales[0] if len(parciales) == 1 else None
 
 
 def etapas_siguientes(context: dict[str, Any] | None) -> list[str]:
@@ -371,7 +421,13 @@ def _label_of(raw: dict[str, Any], start: datetime) -> str:
     day_label = str(raw.get("dayLabel") or "").strip()
     time = str(raw.get("time") or "").strip()
     if day_label and time:
-        return f"{day_label}, {time}"
+        # vocero-cloud 233: con varios profesionales, el horario dice con
+        # quién es. Sin esto el lead acepta «el martes a las 10» sin saber
+        # con quién, y se presenta a otra consulta.
+        agenda = raw.get("agenda")
+        nombre = agenda.get("name") if isinstance(agenda, dict) else None
+        con = f" con {nombre.strip()}" if isinstance(nombre, str) and nombre.strip() else ""
+        return f"{day_label}, {time}{con}"
     return str(raw.get("label") or _iso_z(start))
 
 
@@ -468,8 +524,11 @@ class ToolRuntime:
         tz: ZoneInfo | None = None,
         conversacion_reciente: str | None = None,
         etapas: list[str] | None = None,
+        profesionales: list[dict[str, str]] | None = None,
     ) -> None:
         self._ctx = ctx
+        # vocero-cloud 233 — con quién se puede agendar (`booking.agendas`).
+        self.profesionales: list[dict[str, str]] = list(profesionales or [])
         # 038 — A qué etapas puede mover al lead (`lead.nextStages`).
         self.etapas: list[str] = list(etapas or [])
         # Lo último que se dijo en la conversación (app/dias.py). None ⇒ no
@@ -555,6 +614,14 @@ class ToolRuntime:
                 "error": "fecha_invalida",
                 "detalle": "fecha va como AAAA-MM-DD (p. ej. 2026-09-17); vuelve a llamar",
             }
+        profesional = resolver_profesional(args.get("profesional"), self.profesionales)
+        if args.get("profesional") and self.profesionales and profesional is None:
+            return {
+                "ok": False,
+                "error": "profesional_desconocido",
+                "detalle": "usa el nombre o el id de uno de estos, o llama sin profesional para ver a todos",
+                "profesionales": [{"id": p["id"], "nombre": p["name"]} for p in self.profesionales],
+            }
         fecha_ignorada: str | None = None
         if (
             fecha
@@ -577,6 +644,7 @@ class ToolRuntime:
                 limit=MAX_OFFERED,
                 per_day=OFFER_PER_DAY,
                 days=OFFER_DAYS,
+                **({"agenda_id": profesional["id"]} if profesional else {}),
             )
         except AgendaUnavailable:
             return self._sin_agenda()

@@ -1,0 +1,15 @@
+# ============================================================
+# Nea — lo que Coolify "construye" en el entorno dev: nada.
+#
+# La imagen de verdad sale de `Dockerfile` en GitHub Actions
+# (.github/workflows/imagen-dev.yml) con el commit como etiqueta. Aquí solo se
+# descarga la del commit que Coolify está desplegando, así el VPS de dev no
+# compila.
+#
+# Coolify pasa SOURCE_COMMIT solo. Si la imagen de ese commit no existe (el
+# workflow no ha terminado o falló), el build falla y sigue el contenedor
+# anterior: nunca arranca una imagen que no sea la del commit.
+# ============================================================
+ARG IMAGEN=ghcr.io/kevinrivm/nea-agent-dev
+ARG SOURCE_COMMIT
+FROM ${IMAGEN}:${SOURCE_COMMIT}

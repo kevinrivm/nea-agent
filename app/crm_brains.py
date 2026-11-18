@@ -349,8 +349,12 @@ class BrainsCrmClient(CrmClient):
         limit: int = 12,
         per_day: int | None = None,
         days: int | None = None,
+        agenda_id: str | None = None,
     ) -> dict[str, Any]:
         """Huecos + `query` (hasta dónde llega lo consultado), sin recortar.
+
+        `agenda_id` (vocero-cloud 233): los de UN profesional de
+        `booking.agendas`. Sin él, los de todos, cada instante una vez.
 
         Sin recorte a propósito: con `date` el CRM registra como oferta TODAS
         las horas de ese día, y si Nea se quedara con menos, rechazaría por su
@@ -360,6 +364,8 @@ class BrainsCrmClient(CrmClient):
         params: dict[str, Any] = {"conversationId": conversation_id}
         if date:
             params["date"] = date
+        if agenda_id:
+            params["agendaId"] = agenda_id
         resp = await self._request("GET", "/api/bot/availability", params=params)
         _404_de_agenda(resp, "availability")
         if resp.status_code != 200:

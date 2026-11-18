@@ -188,6 +188,56 @@ class RegistroDeOrganizaciones:
             self._llms[clave] = cliente
         return cliente
 
+    def http_de_ensayo(self, organization_id: str, slug: str, ficha: str) -> Any:
+        """Cliente HTTP del CRM para UN ensayo (app/ensayo.py), sin caché.
+
+        Lleva la credencial derivada de esa organización Y la ficha del
+        ensayo (`X-Vocero-Ensayo`), que el CRM firmó para ESA organización y
+        ESA conversación inventada. Con ella el CRM contesta los huecos sin
+        registrarlos como oferta. No se cachea: la ficha caduca en minutos y
+        un cliente compartido la mezclaría con los turnos de verdad.
+        """
+        import httpx
+
+        return httpx.AsyncClient(
+            base_url=self._base_url.rstrip("/"),
+            headers={
+                "Authorization": f"Bearer {credencial_derivada(self._secreto, organization_id)}",
+                "X-Vocero-Organization": slug,
+                "X-Vocero-Ensayo": ficha,
+            },
+            timeout=15.0,
+        )
+
+    def llm_de_ensayo(
+        self,
+        organization_id: str,
+        slug: str,
+        config: dict[str, Any],
+        por_defecto: Any,
+        ficha: str,
+    ) -> OpenAiLlm:
+        """El modelo de UN ensayo: el mismo camino que `llm`, con la ficha.
+
+        Piensa con la llave del negocio por `/api/brains/llm`, nunca con una de
+        la plataforma. La ficha le dice al CRM que es un ensayo pedido por el
+        dueño, que puede pensar aunque el negocio todavía no esté activado.
+        """
+        base_url = self._base_url.rstrip("/") + str(
+            config.get("path") or "/api/brains/llm"
+        )
+        return OpenAiLlm(
+            credencial_derivada(self._secreto, organization_id),
+            str(config.get("model") or por_defecto.llm_model),
+            # Un ensayo es de texto: no transcribe.
+            transcribe_model="",
+            base_url=base_url,
+            default_headers={"X-Vocero-Organization": slug, "X-Vocero-Ensayo": ficha},
+            reasoning_effort=por_defecto.llm_reasoning_effort,
+            provider_sort=por_defecto.llm_provider_sort,
+            timeout=por_defecto.llm_timeout_seconds,
+        )
+
     async def aclose(self) -> None:
         for cliente in self._clientes.values():
             await cliente.aclose()
