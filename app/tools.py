@@ -56,6 +56,14 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "nombre_preferido": {
+                        "type": "string",
+                        "description": (
+                            "Solo el nombre por el que el lead pide expresamente "
+                            "ser llamado (ej. «prefiero que me digas Dani»). "
+                            "No inventarlo ni deducirlo de un alias del perfil."
+                        ),
+                    },
                     "rubro": {"type": "string"},
                     "rol": {
                         "type": "string",
