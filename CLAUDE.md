@@ -29,6 +29,7 @@ idempotentes al arranque · httpx (CRM y OpenAI) · pytest + respx · Docker
 | El ensayo: el dueño prueba a su agente sin WhatsApp (cloud) | `app/ensayo.py` — el turno de siempre sobre un CRM que solo lee y una memoria que muere con la petición |
 | El webhook de Meta que ya no se recibe (503) | `app/webhook_retirado.py` |
 | Seguimiento | `app/followup.py` |
+| Lo que dijo el equipo mientras la IA estaba en pausa (`humanAttention`, vocerocrm-cloud 238) | `app/atencion_humana.py` — sin el campo el prompt no cambia |
 | Lo que el lead ve en WhatsApp (Markdown → WhatsApp) | `app/formato.py` |
 | El candado de cierre (conversación sin rumbo) | `app/stall.py` + gate 1.5 de `app/turn.py` |
 | `/health` (versión, commit, modo, `llm`, webhook de Meta) | `app/main.py` · `app/version.py` |

@@ -28,6 +28,7 @@ idempotentes al arranque · httpx (CRM y OpenAI) · pytest + respx · Docker
 | Atender a VARIOS negocios a la vez | `app/multiorg.py` |
 | El webhook de Meta que ya no se recibe (503) | `app/webhook_retirado.py` |
 | Seguimiento | `app/followup.py` |
+| Lo que dijo el equipo mientras la IA estaba en pausa (`humanAttention`, vocerocrm-cloud 238) | `app/atencion_humana.py` — sin el campo el prompt no cambia |
 | Lo que el lead ve en WhatsApp (Markdown → WhatsApp) | `app/formato.py` |
 | El candado de cierre (conversación sin rumbo) | `app/stall.py` + gate 1.5 de `app/turn.py` |
 | `/health` (versión, commit, modo, `llm`, webhook de Meta) | `app/main.py` · `app/version.py` |

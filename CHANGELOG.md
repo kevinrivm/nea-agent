@@ -8,6 +8,14 @@ Qué cambia en cada versión de Nea y qué hacer al actualizar. Cada tag
 
 ### Nuevo
 
+- **Nota de que hubo una persona** (vocerocrm-cloud 238). Cuando la IA vuelve
+  a una conversación que atendió alguien del equipo (sola tras N horas, al
+  vencer una pausa con fecha o a mano), el CRM manda `humanAttention` en el
+  despacho (capacidad `atencion_humana`): desde cuándo atendió la persona y lo
+  que se dijeron. Nea añade al prompt una instrucción breve para respetar lo
+  que dijo el equipo —no contradecirlo ni ofrecer otro precio; ante la duda,
+  ofrecer pasar con el equipo— y esa transcripción como contexto. Sin el campo
+  el prompt es idéntico (el raíz no lo manda).
 - **Una sola respuesta por ráfaga** (vocerocrm-cloud 237). Si el CRM anuncia
   `dispatch_superado` en `capabilities`, Nea responde con
   `dropIfSuperseded: true`; cuando el cliente escribió otra vez mientras Nea
