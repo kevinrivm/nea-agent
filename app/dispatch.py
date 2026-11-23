@@ -27,6 +27,7 @@ from typing import Any
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
+from app.atencion_humana import atencion_del_despacho
 from app.multiorg import organizacion_del_despacho
 from app.http_limits import limited_body
 from app.state import AppContext, InboundMessage
@@ -332,6 +333,9 @@ async def _procesar(ctx: AppContext, payload: dict[str, Any], *, durable: bool =
     await handle_flush(
         ctx_turno, identity, mensajes, crm_conversation_id=conversation_id,
         propagate_errors=durable, releer=releer,
+        # vocerocrm-cloud 238: una persona del equipo atendió mientras la IA
+        # estaba en pausa. Sin el campo, el turno es el de siempre.
+        atencion_humana=atencion_del_despacho(payload),
     )
 
 

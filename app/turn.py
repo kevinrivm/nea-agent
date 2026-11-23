@@ -33,6 +33,7 @@ from app.stall import (
     trae_contenido,
 )
 from app.profile import resolve_profile
+from app.atencion_humana import nota_atencion_humana
 from app.prompt import build_system_prompt, zona_del_negocio
 from app.state import AppContext, BotMessage, InboundMessage, utcnow
 from app.tools import (
@@ -121,6 +122,9 @@ class _Turno:
     # ya había leído sus mensajes. Están en el historial: no se vuelven a
     # guardar, solo se contesta lo que quedó sin respuesta.
     releer: bool = False
+    # vocerocrm-cloud 238: `humanAttention` del despacho, ya validado. Una
+    # persona del equipo atendió mientras la IA estaba en pausa.
+    atencion_humana: dict[str, Any] | None = None
 
 
 class TurnoSinCrm(Exception):
@@ -173,6 +177,7 @@ async def handle_flush(
     *,
     propagate_errors: bool = False,
     releer: bool = False,
+    atencion_humana: dict[str, Any] | None = None,
 ) -> None:
     """El turno de un despacho. Sin `propagate_errors`, nunca lanza.
 
@@ -189,7 +194,11 @@ async def handle_flush(
     conversación es. La cola del despacho llama con `propagate_errors`: el
     error sube y es ella la que decide (app/dispatch_worker.py).
     """
-    turno = _Turno(crm_conversation_id=crm_conversation_id or None, releer=releer)
+    turno = _Turno(
+        crm_conversation_id=crm_conversation_id or None,
+        releer=releer,
+        atencion_humana=atencion_humana,
+    )
     try:
         async with conversation_lock(ctx, identity):
             await run_turn(ctx, identity, items, turno)
@@ -473,6 +482,15 @@ async def _responder(
         recordatorios=bool(getattr(ctx.crm, "supports_agenda_v2", False)),
         canal=next((m.channel for m in inbound if m.channel), None),
     )
+    if turno.atencion_humana:
+        # vocerocrm-cloud 238: vuelve tras una persona del equipo. Sin el campo
+        # el prompt queda idéntico (el raíz no lo manda).
+        logger.info(
+            "turno %s: una persona del equipo atendió (%d mensajes) — que no la contradiga",
+            crm_conv_id,
+            len(turno.atencion_humana["messages"]),
+        )
+        system = system + "\n" + nota_atencion_humana(turno.atencion_humana, tz)
     # Se traen más mensajes de los que ve el LLM: el candado de cierre cuenta
     # el hilo COMPLETO del lead, no solo la ventana de contexto.
     recientes = await ctx.store.recent_messages(
