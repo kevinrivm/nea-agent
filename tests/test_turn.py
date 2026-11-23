@@ -170,7 +170,11 @@ async def test_una_nota_interna_no_le_llega_al_lead(ctx, client, respx_mock):
     assert textos == ["Tienes razón, disculpa la repetición. ¡Éxito con tus ventas!"]
 
 
-async def test_si_la_segunda_tambien_sale_mal_silencio_y_handoff(ctx, client, respx_mock):
+async def test_si_la_segunda_tambien_sale_mal_acuse_y_handoff(ctx, client, respx_mock):
+    """vocerocrm-cloud 237: ya no se calla. El lead recibe el acuse corto y la
+    conversación pasa a una persona; ninguna de las dos notas le llega."""
+    from app.turn import ACUSE_TRASPASO
+
     routes = mock_crm_basics(respx_mock)
     ctx.llm.replies = [
         LlmReply(content="(nota interna)"),
@@ -179,6 +183,8 @@ async def test_si_la_segunda_tambien_sale_mal_silencio_y_handoff(ctx, client, re
     await despachar(client, ctx, text="hola")
     await asyncio.sleep(0.25)
 
-    assert routes["messages"].call_count == 0
+    textos = [json.loads(c.request.content)["text"] for c in routes["messages"].calls]
+    assert textos == [ACUSE_TRASPASO]
     assert routes["handoff"].call_count == 1
-    assert json.loads(routes["handoff"].calls[0].request.content)["reason"] == "error"
+    # En la raíz `sin_respuesta` no está en el catálogo: se normaliza.
+    assert json.loads(routes["handoff"].calls[0].request.content)["reason"] == "modelo"

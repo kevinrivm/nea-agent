@@ -19,7 +19,9 @@ from zoneinfo import ZoneInfo
 from app import media
 from app.agenda import agenda_vigente
 from app.config import canonical_identity
+from app.cierres import todo_es_cierre
 from app.crm import CrmConflict, CrmError, CrmUnreachable
+from app.crm_brains import DESPACHO_SUPERADO
 from app.formato import a_whatsapp
 from app.hostility import ALERT as HOSTILITY_ALERT, hostile_streak
 from app.llm import LlmExhausted
@@ -115,6 +117,10 @@ class _Turno:
     crm_conversation_id: str | None = None
     # El motivo del handoff que este turno ya registró, si registró uno.
     handoff: str | None = None
+    # vocerocrm-cloud 237: la red de seguridad del CRM relanzó este turno y Nea
+    # ya había leído sus mensajes. Están en el historial: no se vuelven a
+    # guardar, solo se contesta lo que quedó sin respuesta.
+    releer: bool = False
 
 
 class TurnoSinCrm(Exception):
@@ -166,6 +172,7 @@ async def handle_flush(
     crm_conversation_id: str | None = None,
     *,
     propagate_errors: bool = False,
+    releer: bool = False,
 ) -> None:
     """El turno de un despacho. Sin `propagate_errors`, nunca lanza.
 
@@ -182,7 +189,7 @@ async def handle_flush(
     conversación es. La cola del despacho llama con `propagate_errors`: el
     error sube y es ella la que decide (app/dispatch_worker.py).
     """
-    turno = _Turno(crm_conversation_id=crm_conversation_id or None)
+    turno = _Turno(crm_conversation_id=crm_conversation_id or None, releer=releer)
     try:
         async with conversation_lock(ctx, identity):
             await run_turn(ctx, identity, items, turno)
@@ -337,16 +344,88 @@ async def run_turn(
     )
 
     # Señal de vida: leído + "escribiendo…" mientras Nea piensa (007).
-    # Best-effort absoluto: un fallo aquí jamás afecta el turno.
+    # Best-effort absoluto: un fallo aquí jamás afecta el turno. Se renueva
+    # mientras el turno siga (237): WhatsApp lo apaga solo a los ~25 s, y un
+    # turno con herramientas dura más.
     try:
         await ctx.crm.post_typing(str(crm_conv_id))
     except Exception as exc:
-        logger.debug("typing de %s falló (%s) — sigo", identity, exc)
+        logger.debug("typing de %s falló (%s) — sigo", crm_conv_id, exc)
+    escribiendo = _Escribiendo(ctx, str(crm_conv_id))
+    try:
+        await _responder(
+            ctx, identity, inbound, turno, conv, context, str(crm_conv_id), prueba, escribiendo
+        )
+    finally:
+        await escribiendo.parar()
 
+
+ESCRIBIENDO_CADA_S = 20.0
+# Tope del latido: el turno más largo que la cola deja correr (4 min).
+ESCRIBIENDO_TOPE_S = 240.0
+
+
+class _Escribiendo:
+    """Renueva «escribiendo…» cada ~20 s mientras el turno piensa (237).
+
+    Se para ANTES de enviar: un «escribiendo…» después del mensaje haría creer
+    al cliente que viene otro. Best-effort como el primero.
+    """
+
+    def __init__(self, ctx: AppContext, crm_conv_id: str) -> None:
+        self._ctx = ctx
+        self._conv = crm_conv_id
+        self._alto = asyncio.Event()
+        self._tarea = asyncio.create_task(self._latir())
+
+    async def _latir(self) -> None:
+        transcurrido = 0.0
+        while transcurrido < ESCRIBIENDO_TOPE_S:
+            try:
+                await asyncio.wait_for(self._alto.wait(), timeout=ESCRIBIENDO_CADA_S)
+                return
+            except asyncio.TimeoutError:
+                pass
+            transcurrido += ESCRIBIENDO_CADA_S
+            try:
+                await self._ctx.crm.post_typing(self._conv)
+            except Exception as exc:
+                logger.debug("typing renovado de %s falló (%s) — sigo", self._conv, exc)
+
+    async def parar(self) -> None:
+        self._alto.set()
+        await asyncio.gather(self._tarea, return_exceptions=True)
+
+
+async def _responder(
+    ctx: AppContext,
+    identity: str,
+    inbound: list[InboundMessage],
+    turno: _Turno,
+    conv: Any,
+    context: dict[str, Any],
+    crm_conv_id: str,
+    prueba: bool,
+    escribiendo: _Escribiendo,
+) -> None:
+    """Lo que el turno hace una vez pasados los gates: pensar y contestar."""
+    settings = ctx.settings
     # --- Contenido del turno: texto + multimedia procesada (spec 002) -----
     parts: list[str] = []
     image_uris: list[str] = []
-    for m in inbound:
+    if turno.releer:
+        # Relanzado por la red de seguridad del CRM: lo que el cliente dijo ya
+        # está en el historial. Si lo último ahí es de Nea, ya se contestó (el
+        # envío puede ir en la cola de reintentos) y no hay nada que hacer.
+        ultimos = await ctx.store.recent_messages(conv.id, 1)
+        if not ultimos or ultimos[-1].role != "user":
+            logger.info(
+                "turno %s: relanzado por el CRM, pero ya está contestado — nada que hacer",
+                crm_conv_id,
+            )
+            return
+        logger.info("turno %s: relanzado por el CRM — contesto lo pendiente", crm_conv_id)
+    for m in ([] if turno.releer else inbound):
         if m.text:
             parts.append(m.text)
             continue
@@ -357,15 +436,15 @@ async def run_turn(
             parts.append(part.text)
         if part.image_data_uri:
             image_uris.append(part.image_data_uri)
-    if not parts and not image_uris:
-        logger.info("turno %s: nada procesable en la ráfaga — silencio", identity)
-        return
-
-    user_text = "\n".join(parts)
-    await ctx.store.add_message(
-        conv.id, "user", user_text, wa_message_id=inbound[0].wa_message_id
-    )
-    await _anotar_leidos(ctx, inbound)
+    if not turno.releer:
+        if not parts and not image_uris:
+            logger.info("turno %s: nada procesable en la ráfaga — silencio", crm_conv_id)
+            return
+        user_text = "\n".join(parts)
+        await ctx.store.add_message(
+            conv.id, "user", user_text, wa_message_id=inbound[0].wa_message_id
+        )
+        await _anotar_leidos(ctx, inbound)
 
     # --- Armar mensajes para el LLM ---------------------------------------
     # ¿El CRM agenda HOY? La respuesta caduca (app/agenda.py): si venció, este
@@ -444,7 +523,7 @@ async def run_turn(
     runtime = ToolRuntime(
         ctx,
         conv,
-        str(crm_conv_id),
+        crm_conv_id,
         profile=profile,
         tz=tz,
         conversacion_reciente=_conversacion_reciente(history),
@@ -459,28 +538,60 @@ async def run_turn(
             identity,
             exc,
         )
-        await _safe_handoff(ctx, str(crm_conv_id), "error", turno)
+        await _safe_handoff(ctx, crm_conv_id, "error", turno)
         await ctx.store.update_conversation(
             conv.id, phase="cerrada", followup_due_at=None
         )
         return
 
-    # Última red antes de enviar: el modelo repitió un mensaje que el lead ya
-    # tiene, o escribió una nota para sí mismo. Se le pide UNA vez más; si
-    # vuelve a salir mal, silencio + handoff error, igual que un LLM caído.
+    # Última red antes de enviar (237, «nunca calla sin rastro»): el modelo no
+    # escribió nada, se le acabaron las rondas de herramientas, repitió un
+    # mensaje que el lead ya tiene, escribió una nota para sí mismo o se quedó
+    # en «…:». Se le pide UNA vez más; si vuelve a salir mal, el lead recibe un
+    # acuse corto y la conversación pasa a una persona. Callar solo vale ante
+    # un cierre («gracias», «ok», 👍) o si el turno ya traspasó, reservó o
+    # cerró por su cuenta.
     previos = [m.content for m in recientes if m.role == "assistant"]
-    motivo = _respuesta_invalida(final_text, previos)
+    puede_callar = (
+        cerrar_sin_rumbo
+        or runtime.handoff_reason is not None
+        or runtime.booked
+        or runtime.routed_out
+        or todo_es_cierre(
+            ((m.type, m.text) for m in inbound), previos[-1] if previos else None
+        )
+    )
+    motivo = _motivo_para_corregir(final_text, previos, puede_callar)
     if motivo is not None:
-        logger.warning("turno %s: la respuesta %s — pido otra", identity, motivo)
-        messages.append({"role": "assistant", "content": final_text})
-        messages.append({"role": "system", "content": CORRIGE_RESPUESTA.format(motivo=motivo)})
+        logger.warning("turno %s: la respuesta no sirve (%s) — pido otra", crm_conv_id, motivo)
+        if final_text and final_text.strip():
+            messages.append({"role": "assistant", "content": final_text})
+        messages.append({"role": "system", "content": _correccion(final_text, motivo)})
         try:
             final_text = await _tool_loop(ctx, messages, runtime)
         except LlmExhausted:
-            final_text = None
-        if final_text is None or _respuesta_invalida(final_text, previos):
-            logger.error("turno %s: la segunda respuesta tampoco sirve — silencio + handoff error", identity)
-            await _safe_handoff(ctx, str(crm_conv_id), "error", turno)
+            logger.error("turno %s: el modelo se cayó al corregir — silencio + handoff error", crm_conv_id)
+            await _safe_handoff(ctx, crm_conv_id, "error", turno)
+            await ctx.store.update_conversation(conv.id, phase="cerrada", followup_due_at=None)
+            return
+        # Lo que el modelo hizo en la segunda pasada también cuenta: si ahí
+        # traspasó o reservó, el turno ya dejó rastro.
+        puede_callar = puede_callar or runtime.handoff_reason is not None or runtime.booked or runtime.routed_out
+        segundo = _motivo_para_corregir(final_text, previos, puede_callar)
+        if segundo is not None:
+            logger.error(
+                "turno %s: tampoco la segunda sirve (%s) — acuse y traspaso a una persona",
+                crm_conv_id,
+                segundo,
+            )
+            await escribiendo.parar()
+            estado = await _send_estado(ctx, conv.id, crm_conv_id, ACUSE_TRASPASO)
+            if estado == "superado":
+                logger.info("turno %s: superado por una ráfaga nueva — callo", crm_conv_id)
+                return
+            if estado == "enviado":
+                await ctx.store.add_message(conv.id, "assistant", ACUSE_TRASPASO)
+            await _safe_handoff(ctx, crm_conv_id, "sin_respuesta", turno)
             await ctx.store.update_conversation(conv.id, phase="cerrada", followup_due_at=None)
             return
 
@@ -497,14 +608,29 @@ async def run_turn(
     if final_text and final_text.strip():
         final_text = a_whatsapp(runtime.finalize_reply(final_text.strip()))
     if final_text and final_text.strip():
-        sent = await _send(ctx, conv.id, str(crm_conv_id), final_text)
+        await escribiendo.parar()
+        estado = await _send_estado(ctx, conv.id, crm_conv_id, final_text)
+        sent = estado == "enviado"
         if sent:
             await ctx.store.add_message(conv.id, "assistant", final_text)
+        elif estado == "superado":
+            # vocerocrm-cloud 237: el cliente escribió otra vez mientras se
+            # pensaba esto, y el despacho nuevo trae TODA la ráfaga. Se calla,
+            # sin handoff ni cambio de fase: el turno siguiente contesta todo
+            # junto, una sola vez. Lo que el lead dijo se queda en el historial
+            # (ya está marcado como leído); esta respuesta, no.
+            logger.info(
+                "turno %s: superado por una ráfaga nueva — callo; contesta el despacho siguiente",
+                crm_conv_id,
+            )
+            return
+    else:
+        await escribiendo.parar()
 
     # El handoff se ejecuta DESPUÉS de la despedida (si no, el CRM la rechaza
     # con 409 ai_paused).
     if runtime.handoff_reason is not None:
-        await _safe_handoff(ctx, str(crm_conv_id), runtime.handoff_reason, turno)
+        await _safe_handoff(ctx, crm_conv_id, runtime.handoff_reason, turno)
 
     # --- Fase + seguimiento -----------------------------------------------
     updates: dict[str, Any] = {"greeted": True}
@@ -532,7 +658,7 @@ async def run_turn(
         # Nea que de pronto dejó de contestar.
         await _anotar_cierre(
             ctx,
-            str(crm_conv_id),
+            crm_conv_id,
             cerrada_en.astimezone(tz).isoformat(timespec="minutes"),
             identity,
         )
@@ -683,6 +809,42 @@ CORRIGE_RESPUESTA = (
 )
 
 
+CORRIGE_SILENCIO = (
+    "No le enviaste nada al lead ({motivo}). Escribe ahora el mensaje de "
+    "WhatsApp que responde a su ÚLTIMO mensaje, en tu voz: contesta lo que "
+    "pregunta o dile qué necesitas para ayudarle. Si solo lo puede resolver una "
+    "persona del equipo, usa la herramienta de handoff y despídete."
+)
+# Lo que el lead recibe cuando Nea no logra contestarle: corto, sin prometer
+# nada que no pueda cumplir, y sin datos del negocio que podrían ser falsos.
+ACUSE_TRASPASO = "Dame un momento: una persona de nuestro equipo te atiende en breve."
+
+
+def _correccion(texto: str | None, motivo: str) -> str:
+    if texto and texto.strip():
+        extra = " Escríbelo COMPLETO, con la lista incluida." if "«:»" in motivo else ""
+        return CORRIGE_RESPUESTA.format(motivo=motivo) + extra
+    return CORRIGE_SILENCIO.format(motivo=motivo)
+
+
+def _motivo_para_corregir(
+    texto: str | None, previos: list[str], puede_callar: bool
+) -> str | None:
+    """Por qué hay que pedirle otra respuesta al modelo, o None.
+
+    `None` en `texto` es que se acabaron las rondas de herramientas; un texto
+    vacío, que el modelo eligió no escribir. Las dos son silencio, y solo se
+    aceptan si `puede_callar`.
+    """
+    if texto is None or not texto.strip():
+        if puede_callar:
+            return None
+        if texto is None:
+            return "se acabaron las rondas de herramientas sin texto"
+        return "la respuesta salió vacía"
+    return _respuesta_invalida(texto, previos)
+
+
 def _respuesta_invalida(texto: str | None, previos: list[str]) -> str | None:
     """Por qué este texto no puede salir, o None si puede.
 
@@ -700,6 +862,9 @@ def _respuesta_invalida(texto: str | None, previos: list[str]) -> str | None:
     plano = " ".join(a_whatsapp(texto).split())
     if re.fullmatch(r"[(\[].*[)\]]", plano):
         return "era una nota interna entre paréntesis"
+    # 237 — «necesitas tres datos:» y nada más: la lista se quedó fuera.
+    if plano.endswith((":", "：")):
+        return "se quedó cortado en «:», sin lo que anunciaba"
     # Un «¡Va!» o un «Perfecto 👍» pueden repetirse sin que nadie lo note; un
     # mensaje con contenido repetido entero, no.
     if len(plano) >= REPETICION_MIN and any(
@@ -743,7 +908,9 @@ async def _tool_loop(
             ),
         )
         if not reply.tool_calls:
-            return reply.content  # turno de puro texto
+            # Turno de puro texto. Vacío es "" (el modelo no escribió nada);
+            # None queda para las rondas agotadas, que es otro fallo.
+            return reply.content or ""
         # content vacío con tool_calls es normal (turno solo-herramientas)
         messages.append(
             {
@@ -782,14 +949,23 @@ async def _send(ctx: AppContext, conv_id: int, crm_conv_id: str, text: str) -> b
     """Envía vía el CRM. Si el turno agota sus reintentos, la respuesta NO se
     descarta: se encola en pending_send y el SenderWorker la reintenta con
     backoff hasta entregar o agotar 24 h (incidente 2026-08-03)."""
+    return await _send_estado(ctx, conv_id, crm_conv_id, text) == "enviado"
+
+
+async def _send_estado(ctx: AppContext, conv_id: int, crm_conv_id: str, text: str) -> str:
+    """Como `_send`, pero dice qué pasó: «enviado», «superado» (el cliente
+    escribió otra vez y contesta el despacho siguiente, 237), «bloqueado»
+    (otro 409) o «encolado»."""
     for attempt in range(SEND_ATTEMPTS):
         try:
             await ctx.crm.send_message(crm_conv_id, text)
-            return True
+            return "enviado"
         except CrmConflict as exc:
+            if exc.code == DESPACHO_SUPERADO:
+                return "superado"
             # ai_paused / window_closed: silencio respetuoso, sin reintento.
             logger.info("envío bloqueado por el CRM (%s) — silencio", exc.code)
-            return False
+            return "bloqueado"
         except CrmError as exc:
             logger.warning("envío falló (intento %d): %s", attempt + 1, exc)
             if attempt < SEND_ATTEMPTS - 1:
@@ -810,7 +986,7 @@ async def _send(ctx: AppContext, conv_id: int, crm_conv_id: str, text: str) -> b
         "envío agotó reintentos del turno — encolado como pending_send %d",
         pending_id,
     )
-    return False
+    return "encolado"
 
 
 async def _safe_handoff(

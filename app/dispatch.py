@@ -270,6 +270,7 @@ async def _procesar(ctx: AppContext, payload: dict[str, Any], *, durable: bool =
     leidos = await ctx.store.already_processed(
         [marca_de_leido(org_id, m.wa_message_id) for m in mensajes if m.wa_message_id]
     )
+    releer = False
     if leidos:
         nuevos = [
             m
@@ -284,8 +285,21 @@ async def _procesar(ctx: AppContext, payload: dict[str, Any], *, durable: bool =
             len(nuevos),
         )
         if not nuevos:
-            return
-        mensajes = nuevos
+            if not es_relanzamiento(payload):
+                return
+            # vocerocrm-cloud 237: la red de seguridad del CRM relanza un turno
+            # que nadie contestó. Nea ya leyó esos mensajes; descartarlos por
+            # repetidos dejaría al cliente esperando para siempre. El turno los
+            # contesta sin volver a guardarlos en el historial.
+            logger.info(
+                "despacho %s: relanzamiento %s del CRM con %d mensaje(s) ya leídos — vuelvo a contestar",
+                dispatch_id,
+                payload.get("relaunch"),
+                len(mensajes),
+            )
+            releer = True
+        else:
+            mensajes = nuevos
 
     if ctx.settings.multi_org:
         ctx_turno = await _contexto_multiorg(ctx, payload, identity, conversation_id)
@@ -317,8 +331,14 @@ async def _procesar(ctx: AppContext, payload: dict[str, Any], *, durable: bool =
     # sepa a quién pasársela si revienta antes de leer el contexto.
     await handle_flush(
         ctx_turno, identity, mensajes, crm_conversation_id=conversation_id,
-        propagate_errors=durable,
+        propagate_errors=durable, releer=releer,
     )
+
+
+def es_relanzamiento(payload: dict[str, Any]) -> bool:
+    """¿Lo relanzó la red de seguridad del CRM (`relaunch` ≥ 1)? Sin el campo, no."""
+    valor = payload.get("relaunch")
+    return isinstance(valor, int) and not isinstance(valor, bool) and valor > 0
 
 
 async def _contexto_multiorg(
