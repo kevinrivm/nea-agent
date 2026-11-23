@@ -36,9 +36,23 @@ from app.crm import (
     _booking_conflict,
     _conflict_code,
     _payload,
+    canonical_handoff_reason,
 )
 
 logger = logging.getLogger("nea.crm.brains")
+
+# vocerocrm-cloud 237: el CRM sabe rechazar la respuesta de un turno que el
+# cliente dejó atrás (escribió otra vez mientras Nea pensaba). Lo anuncia en
+# `capabilities` de cada despacho; solo entonces Nea pide callar con
+# `dropIfSuperseded`. Cadenas fijadas en la prueba gemela de los dos repos.
+CAPACIDAD_SUPERADO = "dispatch_superado"
+DESPACHO_SUPERADO = "dispatch_superado"
+
+# El catálogo de motivos de Vocero Cloud. Es más ancho que el de la raíz: en la
+# raíz un motivo desconocido era 422 y se normaliza siempre; aquí estos dos
+# tienen etiqueta propia en la bandeja y normalizarlos los convertía en
+# «El agente decidió escalar», que no es lo que pasó.
+MOTIVOS_CLOUD = frozenset({"sin_credencial", "sin_respuesta"})
 
 # Las rutas que solo cambian de sitio. Las que además cambian de forma tienen
 # su propio método más abajo.
@@ -87,6 +101,8 @@ class BrainsCrmClient(CrmClient):
         self._despachos: dict[str, str] = {}
         self._envelopes: dict[str, dict[str, Any]] = {}
         self.supports_agenda_v2 = False
+        # 237: ¿este CRM rechaza el turno superado si se lo pedimos?
+        self.supports_superado = False
         # El perfil viaja DENTRO del contexto en esta superficie. Se guarda al
         # pedirlo para que `get_profile()` no gaste una llamada de más por
         # turno — y para que el perfil sea el de la conversación que se está
@@ -121,7 +137,9 @@ class BrainsCrmClient(CrmClient):
             self._despachos[conversation_id] = dispatch_id
 
     def registrar_envelope(self, conversation_id: str, payload: dict[str, Any]) -> None:
-        self.supports_agenda_v2 = "agenda_v2" in payload.get("capabilities", [])
+        capacidades = payload.get("capabilities") or []
+        self.supports_superado = CAPACIDAD_SUPERADO in capacidades
+        self.supports_agenda_v2 = "agenda_v2" in capacidades
         if self.supports_agenda_v2:
             self._envelopes[conversation_id] = {"dispatchId": payload.get("dispatchId"), "brainGeneration": payload.get("brainGeneration")}
 
@@ -216,15 +234,18 @@ class BrainsCrmClient(CrmClient):
         encolarlo — con el mensaje YA entregado al cliente final.
         """
         dispatch_id = dispatch_id or self.despacho_de(conversation_id)
-        resp = await self._request(
-            "POST",
-            "/api/bot/messages",
-            json={
-                "dispatchId": dispatch_id,
-                "conversationId": conversation_id,
-                "text": text,
-            },
-        )
+        cuerpo: dict[str, Any] = {
+            "dispatchId": dispatch_id,
+            "conversationId": conversation_id,
+            "text": text,
+        }
+        # 237 — Si el cliente escribió otra vez mientras se pensaba esto, el
+        # CRM ya tiene un despacho nuevo con toda la ráfaga: que esta respuesta
+        # no salga (409 dispatch_superado) y conteste el turno siguiente. Solo
+        # si el CRM lo anunció: uno que no lo conoce no tiene por qué recibirlo.
+        if self.supports_superado:
+            cuerpo["dropIfSuperseded"] = True
+        resp = await self._request("POST", "/api/bot/messages", json=cuerpo)
         if resp.status_code == 409:
             raise CrmConflict(_conflict_code(resp))
         # Ventana de 24 h cerrada. En `/api/bot` era un 409 y aquí es un 422
@@ -237,6 +258,19 @@ class BrainsCrmClient(CrmClient):
             raise CrmError(f"messages devolvió {resp.status_code}")
         data: dict[str, Any] = resp.json()
         return data
+
+    async def post_handoff(self, conversation_id: str, reason: str | None = None) -> None:
+        """Como el de la raíz, pero con los motivos que solo Cloud conoce."""
+        motivo = (reason or "").strip().lower()
+        if motivo not in MOTIVOS_CLOUD:
+            motivo = canonical_handoff_reason(reason)
+        resp = await self._request(
+            "POST",
+            "/api/bot/handoff",
+            json={"conversationId": conversation_id, "reason": motivo},
+        )
+        if resp.status_code != 200:
+            raise CrmError(f"handoff devolvió {resp.status_code}")
 
     async def get_context(self, wa_identity: str) -> dict[str, Any] | None:
         """El contexto, pedido por conversación y no por identidad.

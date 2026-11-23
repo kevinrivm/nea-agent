@@ -29,6 +29,7 @@ idempotentes al arranque · httpx (CRM y OpenAI) · pytest + respx · Docker
 | El ensayo: el dueño prueba a su agente sin WhatsApp (cloud) | `app/ensayo.py` — el turno de siempre sobre un CRM que solo lee y una memoria que muere con la petición |
 | El webhook de Meta que ya no se recibe (503) | `app/webhook_retirado.py` |
 | Seguimiento | `app/followup.py` |
+| Lo que dijo el equipo mientras la IA estaba en pausa (`humanAttention`, vocerocrm-cloud 238) | `app/atencion_humana.py` — sin el campo el prompt no cambia |
 | Lo que el lead ve en WhatsApp (Markdown → WhatsApp) | `app/formato.py` |
 | El candado de cierre (conversación sin rumbo) | `app/stall.py` + gate 1.5 de `app/turn.py` |
 | `/health` (versión, commit, modo, `llm`, webhook de Meta) | `app/main.py` · `app/version.py` |
@@ -77,6 +78,12 @@ idempotentes al arranque · httpx (CRM y OpenAI) · pytest + respx · Docker
   mensajes vuelven hay que leerlos.
 - **Degradación silenciosa**: LLM/CRM fallando jamás rompe el despacho ni manda
   texto roto; tras reintentos → silencio + handoff `error`.
+- **Nunca calla sin rastro** (vocerocrm-cloud 237): si el modelo no escribe
+  nada (vacío o rondas agotadas) o escribe algo que no puede salir, se le pide
+  UNA corrección; si sigue mal, acuse corto + handoff `sin_respuesta`. Solo se
+  calla ante un cierre (`app/cierres.py`, gemelo del CRM). Un `409
+  dispatch_superado` NO es un fallo: el cliente escribió otra vez y contesta el
+  despacho siguiente — silencio, sin handoff y sin guardar la respuesta.
 - **Un turno sin CRM no se reintenta aquí.** Si el gate 2 no alcanza al CRM,
   `TurnoSinCrm` sube a la cola del despacho, que le pasa la conversación a una
   persona (handoff `error`) en cuanto el CRM conteste. Nunca se repite un
