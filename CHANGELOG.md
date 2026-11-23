@@ -8,6 +8,31 @@ Qué cambia en cada versión de Nea y qué hacer al actualizar. Cada tag
 
 ### Nuevo
 
+- **Una sola respuesta por ráfaga** (vocerocrm-cloud 237). Si el CRM anuncia
+  `dispatch_superado` en `capabilities`, Nea responde con
+  `dropIfSuperseded: true`; cuando el cliente escribió otra vez mientras Nea
+  pensaba, el CRM contesta `409 dispatch_superado` y Nea calla: sin traspaso,
+  sin cambiar de fase y sin guardar esa respuesta. El despacho siguiente
+  contesta todo junto. Contra un CRM que no lo anuncia (el raíz de hoy) el
+  cuerpo no cambia.
+- **Nunca calla sin rastro** (237). Una respuesta vacía, las rondas de
+  herramientas agotadas, una nota interna, una repetición o un texto cortado en
+  «:» se corrigen una vez; si la segunda tampoco sirve, el lead recibe un acuse
+  corto («una persona de nuestro equipo te atiende en breve») y la conversación
+  pasa a una persona con motivo `sin_respuesta` (en la raíz se normaliza a
+  `modelo`). Callar solo vale ante un cierre genérico («gracias», «ok», 👍;
+  `app/cierres.py`), y no tras una pregunta de Nea.
+- **«Escribiendo…» renovado cada 20 s** mientras el turno piensa, y apagado
+  antes de enviar.
+- **Turnos relanzados por el CRM** (237): un despacho con `relaunch` ≥ 1 se
+  contesta aunque sus mensajes ya estuvieran leídos, sin volver a guardarlos; si
+  lo último del historial ya es de Nea, no hace nada.
+
+### Arreglos
+
+- En cloud, `sin_credencial` y `sin_respuesta` llegan al CRM tal cual: antes
+  se normalizaban a `modelo` y la bandeja decía «El agente decidió escalar».
+
 - **Varios profesionales con un número** (vocerocrm-cloud 233). Cuando el CRM
   manda `booking.agendas`, el prompt lista a los profesionales con lo que
   atiende cada uno: Nea pregunta con quién o para qué antes de ofrecer, llama a
