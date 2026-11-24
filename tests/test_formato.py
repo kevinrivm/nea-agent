@@ -208,6 +208,11 @@ _CONVERTIDO = (
 async def test_el_turno_envia_y_guarda_lo_convertido(respx_mock):
     ctx = make_ctx()
     ctx.llm.replies = [LlmReply(content=_CRUDO)]
+    # El enlace ya estaba en la conversación: no es inventado (app/candados.py).
+    conv = await ctx.store.get_or_create_conversation(IDENTITY)
+    await ctx.store.add_message(
+        conv.id, "assistant", "Agenda en https://cal.com/clinica_sonrie/valoracion__30min"
+    )
     routes = mock_crm_basics(respx_mock)
     app = create_app(ctx=ctx)
     async with httpx.AsyncClient(

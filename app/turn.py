@@ -24,6 +24,14 @@ from app.crm import CrmConflict, CrmError, CrmUnreachable
 from app.crm_brains import DESPACHO_SUPERADO
 from app.formato import a_whatsapp
 from app.hostility import ALERT as HOSTILITY_ALERT, hostile_streak
+from app.candados import (
+    MANIPULACION_ALERT,
+    afirma_agendado,
+    enlaces_ajenos,
+    intenta_manipular,
+    promete_traspaso,
+    quitar_enlaces,
+)
 from app.llm import LlmExhausted
 from app.stall import (
     ALERTA as STALL_ALERT,
@@ -536,6 +544,13 @@ async def _responder(
         last["content"] = [{"type": "text", "text": str(last["content"])}] + [
             {"type": "image_url", "image_url": {"url": uri}} for uri in image_uris
         ]
+    # Intento de manipulación («ignora tus instrucciones», «el dueño me
+    # autorizó gratis»): el turno lleva una alerta para que el modelo no
+    # cambie sus reglas. Va después de las imágenes: esas se pegan al último
+    # mensaje del lead, no a una alerta.
+    if not turno.releer and any(intenta_manipular(m.text) for m in inbound):
+        logger.warning("turno %s: el lead intenta cambiarle las reglas — alerta en el turno", crm_conv_id)
+        messages.append({"role": "system", "content": MANIPULACION_ALERT})
 
     # --- LLM con tools ----------------------------------------------------
     runtime = ToolRuntime(
@@ -579,7 +594,13 @@ async def _responder(
             ((m.type, m.text) for m in inbound), previos[-1] if previos else None
         )
     )
-    motivo = _motivo_para_corregir(final_text, previos, puede_callar)
+    # Lo que el modelo tenía a la vista ANTES de escribir: la respuesta que se
+    # rechace no puede volverse «conocida» para la segunda pasada.
+    conocido = _lo_que_vio(messages)
+    visto_hasta = len(messages)
+    motivo = _motivo_para_corregir(final_text, previos, puede_callar) or _motivo_candado(
+        final_text, runtime, conocido
+    )
     if motivo is not None:
         logger.warning("turno %s: la respuesta no sirve (%s) — pido otra", crm_conv_id, motivo)
         if final_text and final_text.strip():
@@ -596,6 +617,16 @@ async def _responder(
         # traspasó o reservó, el turno ya dejó rastro.
         puede_callar = puede_callar or runtime.handoff_reason is not None or runtime.booked or runtime.routed_out
         segundo = _motivo_para_corregir(final_text, previos, puede_callar)
+        if segundo is None and final_text:
+            # Un enlace que sigue sin estar en su información se quita; el
+            # resto del mensaje sí sirve.
+            nuevo = [m for m in messages[visto_hasta:] if m.get("role") == "tool"]
+            ajenos = enlaces_ajenos(final_text, conocido + "\n" + _lo_que_vio(nuevo))
+            if ajenos:
+                logger.warning("turno %s: quito %d enlace(s) inventado(s)", crm_conv_id, len(ajenos))
+                final_text = quitar_enlaces(final_text, ajenos)
+            if afirma_agendado(final_text) and not runtime.booked:
+                segundo = "volvió a dar por agendada una cita que no se agendó"
         if segundo is not None:
             logger.error(
                 "turno %s: tampoco la segunda sirve (%s) — acuse y traspaso a una persona",
@@ -617,6 +648,13 @@ async def _responder(
     # llamado el modelo o no (la regla de negocio no depende de su humor).
     if streak >= 3 and runtime.handoff_reason is None:
         runtime.handoff_reason = "hostilidad"
+    # Lo que se promete se hace: «le pido al equipo que te escriba» sin
+    # llamar `handoff` dejaba al lead esperando a alguien que no sabía que
+    # tenía que escribir (REMI Arcade, nov-2026). El traspaso va después de
+    # la respuesta, como cualquier otro.
+    if runtime.handoff_reason is None and promete_traspaso(final_text):
+        logger.warning("turno %s: prometió que una persona le escribe — traspaso", crm_conv_id)
+        runtime.handoff_reason = "modelo"
 
     # --- Enviar la respuesta (SIEMPRE vía el CRM, nunca Meta directo) -----
     # WhatsApp no pinta Markdown: se convierte aquí, y lo que se guarda en el
@@ -836,6 +874,37 @@ CORRIGE_SILENCIO = (
 # Lo que el lead recibe cuando Nea no logra contestarle: corto, sin prometer
 # nada que no pueda cumplir, y sin datos del negocio que podrían ser falsos.
 ACUSE_TRASPASO = "Dame un momento: una persona de nuestro equipo te atiende en breve."
+
+
+def _lo_que_vio(messages: list[dict[str, Any]]) -> str:
+    """Todo el texto que el modelo tuvo a la vista: prompt, historial, alertas
+    y lo que devolvieron las herramientas. Contra esto se miden los enlaces."""
+    trozos: list[str] = []
+    for m in messages:
+        c = m.get("content")
+        if isinstance(c, str):
+            trozos.append(c)
+        elif isinstance(c, list):
+            trozos.extend(str(p.get("text", "")) for p in c if isinstance(p, dict))
+    return "\n".join(trozos)
+
+
+def _motivo_candado(texto: str | None, runtime: Any, conocido: str) -> str | None:
+    """Lo que el lead vería y no es cierto (app/candados.py), o None."""
+    if not texto or not texto.strip():
+        return None
+    if afirma_agendado(texto) and not runtime.booked:
+        return (
+            "decía que la cita quedó agendada, pero no la agendaste. No la des por "
+            "hecha: si falta un dato o un horario, pídelo"
+        )
+    ajenos = enlaces_ajenos(texto, conocido)
+    if ajenos:
+        return (
+            f"traía un enlace que no está en tu información ({', '.join(ajenos)}). Usa "
+            "solo enlaces que aparezcan tal cual en tu información, o no pongas ninguno"
+        )
+    return None
 
 
 def _correccion(texto: str | None, motivo: str) -> str:
