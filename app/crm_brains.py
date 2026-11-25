@@ -41,6 +41,9 @@ from app.crm import (
 
 logger = logging.getLogger("nea.crm.brains")
 
+# vocerocrm-cloud 243: lo más que se espera a una fuente de consulta.
+TIEMPO_DE_FUENTE = 5.0
+
 # vocerocrm-cloud 237: el CRM sabe rechazar la respuesta de un turno que el
 # cliente dejó atrás (escribió otra vez mientras Nea pensaba). Lo anuncia en
 # `capabilities` de cada despacho; solo entonces Nea pide callar con
@@ -148,6 +151,23 @@ class BrainsCrmClient(CrmClient):
         if not response.is_success:
             raise CrmConflict("followup_not_allowed")
         return response.json()
+
+    async def buscar_en_fuente(self, conversation_id: str, source_id: str, query: str) -> dict[str, Any]:
+        """vocerocrm-cloud 243 — `POST /api/brains/fuentes/buscar` (solo lectura).
+
+        Con su propio tiempo máximo: una fuente lenta no puede dejar al
+        cliente esperando 15 s. Cualquier fallo es `CrmError` y el turno lo
+        trata como «la fuente no respondió».
+        """
+        response = await self._request(
+            "POST",
+            "/api/brains/fuentes/buscar",
+            json={"conversationId": conversation_id, "sourceId": source_id, "query": query},
+            timeout=TIEMPO_DE_FUENTE,
+        )
+        if response.status_code != 200:
+            raise CrmError(f"fuente {source_id}: HTTP {response.status_code}")
+        return _payload(response)
 
     async def list_bookings(self, conversation_id: str) -> list[dict[str, Any]]:
         response = await self._request("GET", "/api/brains/agenda/bookings", params={"conversationId": conversation_id})

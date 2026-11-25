@@ -109,6 +109,20 @@ class CrmDeEnsayo:
     async def list_bookings(self, conversation_id: str) -> list[dict[str, Any]]:
         return [c for c in self.citas if c["status"] == "agendada"]
 
+    async def buscar_en_fuente(self, conversation_id: str, source_id: str, query: str) -> dict[str, Any]:
+        """vocerocrm-cloud 243: consultar es lectura; en el ensayo va de verdad."""
+        r = await self._lectura.buscar_en_fuente(conversation_id, source_id, query)
+        self.eventos.append(
+            {
+                "type": "source_lookup",
+                "source": source_id,
+                "query": query,
+                "found": len(r.get("found") or []),
+                "similar": len(r.get("similar") or []),
+            }
+        )
+        return r
+
     # -------------------------------------------- escritura (simulada) ---
 
     async def send_message(self, conversation_id: str, text: str, dispatch_id: str = "") -> dict[str, Any]:
