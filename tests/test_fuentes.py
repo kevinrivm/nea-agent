@@ -176,6 +176,7 @@ async def test_no_encontrado_con_regla_equipo_traspasa_aunque_el_modelo_no(respx
     ]
     await _turno(ctx, "trae metal slug 7?")
     assert "llama handoff" in ctx.llm.calls[1]["messages"][-1]["content"]
+    assert "NO digas que no lo tienen" in ctx.llm.calls[1]["messages"][-1]["content"]
     assert rutas["messages"].called
     assert rutas["handoff"].called
 

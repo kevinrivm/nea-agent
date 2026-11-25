@@ -1198,8 +1198,9 @@ class ToolRuntime:
         elif fuente["ifNotFound"] == "handoff":
             self.fuente_pide_equipo = "modelo"
             r["indicacion"] = (
-                "no está en la fuente. Dile al cliente con naturalidad que lo "
-                "revisas con el equipo y llama handoff. No afirmes que no existe."
+                "no apareció en la fuente. Dile al cliente que no lo encontraste "
+                "en el catálogo y que lo confirmas con el equipo, y llama handoff. "
+                "NO digas que no lo tienen ni que no existe: lo decide el equipo."
             )
         else:
             r["indicacion"] = (
