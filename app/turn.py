@@ -49,6 +49,8 @@ from app.tools import (
     con_mover_etapa,
     etapas_siguientes,
     profesionales_del_contexto,
+    fuentes_del_contexto,
+    con_consultar_fuente,
     solo_encendidas,
     tool_schemas,
 )
@@ -562,6 +564,7 @@ async def _responder(
         conversacion_reciente=_conversacion_reciente(history),
         etapas=etapas_siguientes(context),
         profesionales=profesionales_del_contexto(context),
+        fuentes=fuentes_del_contexto(context),
     )
     try:
         final_text = await _tool_loop(ctx, messages, runtime)
@@ -655,6 +658,13 @@ async def _responder(
     if runtime.handoff_reason is None and promete_traspaso(final_text):
         logger.warning("turno %s: prometió que una persona le escribe — traspaso", crm_conv_id)
         runtime.handoff_reason = "modelo"
+    # vocerocrm-cloud 243: la fuente no encontró lo pedido y el dueño dijo
+    # «pasar al equipo» (o la fuente no respondió). El traspaso sucede aunque
+    # el modelo no lo haya llamado.
+    pide_equipo = getattr(runtime, "fuente_pide_equipo", None)
+    if runtime.handoff_reason is None and pide_equipo:
+        logger.info("turno %s: la fuente no resolvió — traspaso por regla del negocio", crm_conv_id)
+        runtime.handoff_reason = pide_equipo
 
     # --- Enviar la respuesta (SIEMPRE vía el CRM, nunca Meta directo) -----
     # WhatsApp no pinta Markdown: se convierte aquí, y lo que se guarda en el
@@ -982,16 +992,19 @@ async def _tool_loop(
     for _ in range(MAX_TOOL_ROUNDS):
         reply = await ctx.llm.complete(
             messages,
-            tools=solo_encendidas(
-                con_mover_etapa(
-                    tool_schemas(
-                        ctx.agenda_enabled,
-                        bool(getattr(ctx.crm, "supports_agenda_v2", False)),
-                        bool(getattr(ctx.crm, "supports_coordination", False)),
+            tools=con_consultar_fuente(
+                solo_encendidas(
+                    con_mover_etapa(
+                        tool_schemas(
+                            ctx.agenda_enabled,
+                            bool(getattr(ctx.crm, "supports_agenda_v2", False)),
+                            bool(getattr(ctx.crm, "supports_coordination", False)),
+                        ),
+                        getattr(runtime, "etapas", []),
                     ),
-                    getattr(runtime, "etapas", []),
+                    getattr(runtime, "_profile", None),
                 ),
-                getattr(runtime, "_profile", None),
+                getattr(runtime, "fuentes", []),
             ),
         )
         if not reply.tool_calls:

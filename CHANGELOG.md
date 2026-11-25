@@ -8,6 +8,15 @@ Qué cambia en cada versión de Nea y qué hacer al actualizar. Cada tag
 
 ### Nuevo
 
+- **Fuentes de consulta** (vocerocrm-cloud 243). Si el contexto trae
+  `sources` (el catálogo, la lista de precios o las existencias que el
+  negocio subió al CRM), el modelo tiene `consultar_fuente` y el prompt le
+  pide usarla antes de contestar si tienen algo. Busca por
+  `POST /api/brains/fuentes/buscar` (5 s de tope, 3 consultas por turno) y
+  contesta solo con lo que encontró. Si no encuentra y el dueño eligió
+  «pasar al equipo», o si la fuente no responde, el traspaso se hace aunque
+  el modelo no lo llame. Sin `sources` nada cambia. El ensayo consulta de
+  verdad y lo anota como `source_lookup`.
 - **Lo que se promete se hace** (`app/candados.py`). Si la respuesta le dice
   al lead que una persona le va a escribir («le pido al equipo que te
   confirme, en un momento te escriben por aquí») y el modelo no llamó

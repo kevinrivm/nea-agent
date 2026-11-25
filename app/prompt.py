@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo
 import json
 from app.profile import BusinessProfile
 from app.state import Conversation, OfferedSlot
-from app.tools import etapas_siguientes
+from app.tools import etapas_siguientes, fuentes_del_contexto
 
 DEFAULT_TZ = ZoneInfo("America/Mexico_City")
 
@@ -299,6 +299,27 @@ def _enlace(cita: dict) -> str:
     return ""
 
 
+def _lineas_fuentes(context: dict | None) -> list[str]:
+    """vocerocrm-cloud 243 — el catálogo del negocio, fuera del conocimiento.
+
+    Sin `sources` (sin fuentes encendidas, o un CRM de antes) no se dice
+    nada y el prompt queda idéntico.
+    """
+    fuentes = fuentes_del_contexto(context)
+    if not fuentes:
+        return []
+    nombres = ", ".join(f"«{f['name']}»" for f in fuentes)
+    return [
+        f"- FUENTES DE CONSULTA del negocio: {nombres}. Si el cliente pregunta "
+        "si tienen algo, su precio, si hay existencia o sus datos, y una fuente "
+        "lo cubre, llama consultar_fuente ANTES de contestar, aunque creas "
+        "saberlo: la fuente manda sobre los ejemplos del conocimiento. Contesta "
+        "solo con lo que devuelva, sin «probablemente» ni «creo que». `similar` "
+        "son alternativas, NUNCA lo que pidió. Para un saludo, el horario u "
+        "otra duda que no toque la fuente, no la uses."
+    ]
+
+
 def _lineas_profesionales(context: dict | None) -> list[str]:
     """vocero-cloud 233 — un número, varios profesionales.
 
@@ -498,6 +519,8 @@ def build_system_prompt(
                 "que por aquí no hay recordatorios y repítele el día y la hora "
                 "para que los tenga."
             )
+
+    lines.extend(_lineas_fuentes(context))
 
     contact = (context or {}).get("contact") or {}
     lead = (context or {}).get("lead") or {}

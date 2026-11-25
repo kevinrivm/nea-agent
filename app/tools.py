@@ -255,6 +255,87 @@ def profesionales_del_contexto(context: dict[str, Any] | None) -> list[dict[str,
     return out
 
 
+# vocerocrm-cloud 243 — Fuentes de consulta: el catálogo o la lista de precios
+# del negocio, que no cabe en el conocimiento. El CRM las manda en
+# `sources` del contexto (solo las encendidas); sin ellas la herramienta no
+# existe y el turno es el de siempre.
+MAX_CONSULTAS_FUENTE = 3
+
+
+def fuentes_del_contexto(context: dict[str, Any] | None) -> list[dict[str, str]]:
+    """`sources` del contexto: `[{id, name, whenToUse, ifNotFound}]`."""
+    crudas = (context or {}).get("sources")
+    if not isinstance(crudas, list):
+        return []
+    out: list[dict[str, str]] = []
+    for f in crudas:
+        if not isinstance(f, dict):
+            continue
+        id_, name = f.get("id"), f.get("name")
+        if not (isinstance(id_, str) and id_ and isinstance(name, str) and name.strip()):
+            continue
+        cuando = f.get("whenToUse")
+        si_no = f.get("ifNotFound")
+        out.append(
+            {
+                "id": id_,
+                "name": name.strip(),
+                "whenToUse": cuando.strip() if isinstance(cuando, str) else "",
+                "ifNotFound": si_no if si_no in ("say", "handoff") else "say",
+            }
+        )
+    return out
+
+
+def schema_consultar_fuente(fuentes: list[dict[str, str]]) -> dict[str, Any]:
+    lista = "\n".join(
+        f"- {f['id']}: {f['name']}" + (f" — {f['whenToUse']}" if f["whenToUse"] else "")
+        for f in fuentes
+    )
+    return {
+        "type": "function",
+        "function": {
+            "name": "consultar_fuente",
+            "description": (
+                "Busca en una fuente de consulta del negocio (su catálogo, lista "
+                "de precios o existencias) y devuelve lo que encontró. Úsala ANTES "
+                "de contestar si el cliente pregunta si tienen algo, su precio o "
+                "sus datos y la fuente lo cubre: lo que no está en la fuente no lo "
+                "afirmes. Fuentes:\n" + lista
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "fuente": {
+                        "type": "string",
+                        "enum": [f["id"] for f in fuentes],
+                        "description": "El id de la fuente",
+                    },
+                    "consulta": {
+                        "type": "string",
+                        "description": (
+                            "SOLO el nombre, modelo o código de lo que pide, como "
+                            "aparecería en la fuente: sin «tienen», «precio de» ni "
+                            "saludos. Si la fuente está en otro idioma (p. ej. "
+                            "nombres de juegos en inglés), tradúcelo: «pokemon "
+                            "amarillo» → «pokemon yellow». Respeta los números: "
+                            "«metal slug 6»."
+                        ),
+                    },
+                },
+                "required": ["fuente", "consulta"],
+            },
+        },
+    }
+
+
+def con_consultar_fuente(
+    schemas: list[dict[str, Any]], fuentes: list[dict[str, str]]
+) -> list[dict[str, Any]]:
+    """El catálogo del turno más `consultar_fuente` si el negocio tiene fuentes."""
+    return schemas + [schema_consultar_fuente(fuentes)] if fuentes else schemas
+
+
 def _sin_acentos(texto: str) -> str:
     import unicodedata
 
@@ -525,8 +606,17 @@ class ToolRuntime:
         conversacion_reciente: str | None = None,
         etapas: list[str] | None = None,
         profesionales: list[dict[str, str]] | None = None,
+        fuentes: list[dict[str, str]] | None = None,
     ) -> None:
         self._ctx = ctx
+        # vocerocrm-cloud 243 — dónde puede buscar (`sources` del contexto).
+        self.fuentes: list[dict[str, str]] = list(fuentes or [])
+        self.consultas_fuente = 0
+        # Una consulta sin resultado con «si no encuentra: pasar al equipo»
+        # (o una fuente que no respondió) deja aquí el traspaso pendiente;
+        # otra consulta que sí encuentra lo quita. turn.py lo vuelve handoff
+        # si el modelo no lo hizo: esa regla es del dueño, no del modelo.
+        self.fuente_pide_equipo: str | None = None
         # vocero-cloud 233 — con quién se puede agendar (`booking.agendas`).
         self.profesionales: list[dict[str, str]] = list(profesionales or [])
         # 038 — A qué etapas puede mover al lead (`lead.nextStages`).
@@ -572,6 +662,8 @@ class ToolRuntime:
                 return await self._route_out()
             if name == "handoff":
                 return self._handoff(args)
+            if name == "consultar_fuente" and self.fuentes:
+                return await self._consultar_fuente(args)
             logger.warning("tools: herramienta desconocida %r", name)
             return {"ok": False, "error": f"herramienta desconocida: {name}"}
         except CrmError as exc:
@@ -1054,6 +1146,70 @@ class ToolRuntime:
             out["recursos"] = self._profile.resources
             out["instrucciones"] = "comparte estos recursos al despedirte, puerta abierta"
         return out
+
+    async def _consultar_fuente(self, args: dict[str, Any]) -> dict[str, Any]:
+        """vocerocrm-cloud 243 — `POST /api/brains/fuentes/buscar`.
+
+        El resultado va con una indicación corta de qué hacer, porque lo que
+        se le pide al modelo depende de la regla del dueño (`ifNotFound`).
+        Si la fuente no responde, el modelo NO puede decir que algo no
+        existe: no lo consultó.
+        """
+        fuente = next((f for f in self.fuentes if f["id"] == args.get("fuente")), None)
+        if fuente is None:
+            return {
+                "ok": False,
+                "error": "fuente_desconocida",
+                "fuentes": [f["id"] for f in self.fuentes],
+            }
+        consulta = str(args.get("consulta") or "").strip()[:200]
+        if not consulta:
+            return {"ok": False, "error": "consulta_vacia", "detalle": "manda el nombre de lo que pide el cliente"}
+        if self.consultas_fuente >= MAX_CONSULTAS_FUENTE:
+            return {
+                "ok": False,
+                "error": "limite_de_consultas",
+                "detalle": "ya buscaste varias veces en este turno: contesta con lo que encontraste o pasa al equipo",
+            }
+        self.consultas_fuente += 1
+        buscar = getattr(self._ctx.crm, "buscar_en_fuente", None)
+        try:
+            if buscar is None:
+                raise CrmError("este CRM no tiene fuentes")
+            r = await buscar(self._crm_conv_id, fuente["id"], consulta)
+        except CrmError as exc:
+            logger.warning("consultar_fuente %s: la fuente no respondió: %s", fuente["id"], exc)
+            self.fuente_pide_equipo = "modelo"
+            return {
+                "ok": False,
+                "error": "fuente_no_disponible",
+                "detalle": (
+                    "la fuente no respondió. NO digas que lo tienen ni que no lo "
+                    "tienen: dile al cliente con naturalidad que lo confirmas con "
+                    "el equipo y llama handoff."
+                ),
+            }
+        if not isinstance(r, dict):
+            r = {}
+        encontrados = r.get("found")
+        if isinstance(encontrados, list) and encontrados:
+            self.fuente_pide_equipo = None
+            r["indicacion"] = "contesta con estos datos y nada más; no agregues lo que no viene aquí"
+        elif fuente["ifNotFound"] == "handoff":
+            self.fuente_pide_equipo = "modelo"
+            r["indicacion"] = (
+                "no apareció en la fuente. Dile al cliente que no lo encontraste "
+                "en el catálogo y que lo confirmas con el equipo, y llama handoff. "
+                "NO digas que no lo tienen ni que no existe: lo decide el equipo."
+            )
+        else:
+            r["indicacion"] = (
+                "no está en la fuente: dile al cliente que no lo tienen, sin "
+                "«probablemente». Si hay `similar`, puedes ofrecerlos como "
+                "alternativa, aclarando que no son lo que pidió. Si crees que lo "
+                "escribió distinto, puedes buscar una variante una vez más."
+            )
+        return r
 
     def _handoff(self, args: dict[str, Any]) -> dict[str, Any]:
         self.handoff_reason = str(args.get("reason") or "lead_request")
